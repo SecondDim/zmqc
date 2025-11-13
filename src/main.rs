@@ -21,6 +21,15 @@ struct ZmqArgs {
     /// Optional topic for PUB/SUB filtering
     #[arg(long)]
     topic: Option<String>,
+
+    #[arg(long)]
+    file: Option<String>,
+
+    #[arg(long)]
+    buf: Option<i32>,
+
+    #[arg(long)]
+    hwm: Option<i32>,
 }
 
 /// Mode enum for publish/subscribe (used with clap's ValueEnum)
@@ -35,10 +44,10 @@ fn main() {
 
     match args.mode {
         Mode::Pub => {
-            pub_mode::run_publisher(&args.endpoint, args.bind, args.topic.as_deref());
+            pub_mode::run_publisher(args);
         }
         Mode::Sub => {
-            sub_mode::run_subscriber(&args.endpoint, args.bind, args.topic.as_deref());
+            sub_mode::run_subscriber(args);
         }
     }
 }
