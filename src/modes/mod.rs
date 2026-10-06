@@ -1,4 +1,6 @@
+pub mod dealer_mode;
 pub mod pub_mode;
+pub mod router_mode;
 pub mod sub_mode;
 
 #[cfg(test)]

@@ -211,3 +211,156 @@ async fn ac_e2e_09_wildcard_topic_receives_all_messages() {
     assert_eq!(received_topics, vec!["alpha", "beta", "gamma"]);
 }
 
+// AC-E2E-10: Dealer <-> Router bidirectional messaging
+#[tokio::test]
+async fn ac_e2e_10_dealer_router_bidirectional() {
+    use super::dealer_mode::{build_dealer_message, parse_dealer_frames, resolve_dealer_topic};
+    use super::router_mode::{build_router_message, parse_router_frames};
+    use zeromq::{DealerSocket, RouterSocket};
+
+    let mut router = RouterSocket::new();
+    let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut dealer = DealerSocket::new();
+    dealer.connect(&endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    // Dealer sends to Router
+    let ping = build_dealer_message(&resolve_dealer_topic("chat"), Bytes::from_static(b"ping"));
+    dealer.send(ping).await.unwrap();
+
+    let r_msg = tokio::time::timeout(RECV_TIMEOUT, router.recv()).await.unwrap().unwrap();
+    let (raw_id, _, topic, payload) = parse_router_frames(&r_msg);
+    assert_eq!(topic, "chat");
+    assert_eq!(payload, "ping");
+
+    // Router replies back to Dealer
+    let pong = build_router_message(raw_id, &resolve_dealer_topic("chat"), Bytes::from_static(b"pong"));
+    router.send(pong).await.unwrap();
+
+    let d_msg = tokio::time::timeout(RECV_TIMEOUT, dealer.recv()).await.unwrap().unwrap();
+    let (d_topic, d_payload) = parse_dealer_frames(&d_msg);
+    assert_eq!(d_topic, "chat");
+    assert_eq!(d_payload, "pong");
+}
+
+// AC-E2E-11: Dealer with custom identity displays as text on Router
+#[tokio::test]
+async fn ac_e2e_11_dealer_identity_displays_as_text_on_router() {
+    use super::dealer_mode::{build_dealer_message, resolve_dealer_topic};
+    use super::router_mode::parse_router_frames;
+    use zeromq::{DealerSocket, RouterSocket, SocketOptions};
+
+    let mut router = RouterSocket::new();
+    let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut opts = SocketOptions::default();
+    opts.peer_identity(Bytes::from_static(b"alice").try_into().unwrap());
+    let mut dealer = DealerSocket::with_options(opts);
+    dealer.connect(&endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    dealer.send(build_dealer_message(&resolve_dealer_topic("*"), Bytes::from_static(b"hi"))).await.unwrap();
+
+    let r_msg = tokio::time::timeout(RECV_TIMEOUT, router.recv()).await.unwrap().unwrap();
+    let (raw_id, id_disp, _, payload) = parse_router_frames(&r_msg);
+    assert_eq!(raw_id.as_ref(), b"alice");
+    assert_eq!(id_disp, "alice");
+    assert_eq!(payload, "hi");
+}
+
+// AC-E2E-12: Router directs message to specific Dealer using <msg>|<id>
+#[tokio::test]
+async fn ac_e2e_12_router_directs_message_to_specific_dealer() {
+    use super::dealer_mode::{build_dealer_message, parse_dealer_frames, resolve_dealer_topic};
+    use super::router_mode::{build_router_message, parse_router_frames, parse_router_input, PeerRegistry};
+    use zeromq::{DealerSocket, RouterSocket, SocketOptions};
+
+    let mut router = RouterSocket::new();
+    let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut opts_a = SocketOptions::default();
+    opts_a.peer_identity(Bytes::from_static(b"alice").try_into().unwrap());
+    let mut dealer_a = DealerSocket::with_options(opts_a);
+    dealer_a.connect(&endpoint).await.unwrap();
+
+    let mut opts_b = SocketOptions::default();
+    opts_b.peer_identity(Bytes::from_static(b"bob").try_into().unwrap());
+    let mut dealer_b = DealerSocket::with_options(opts_b);
+    dealer_b.connect(&endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    // Both send a ping so router records their identities
+    let mut registry = PeerRegistry::default();
+    dealer_a.send(build_dealer_message(&resolve_dealer_topic("*"), Bytes::from_static(b"ping_a"))).await.unwrap();
+    let msg_a = tokio::time::timeout(RECV_TIMEOUT, router.recv()).await.unwrap().unwrap();
+    let (id_a, _, _, _) = parse_router_frames(&msg_a);
+    registry.record_peer(id_a);
+
+    dealer_b.send(build_dealer_message(&resolve_dealer_topic("*"), Bytes::from_static(b"ping_b"))).await.unwrap();
+    let msg_b = tokio::time::timeout(RECV_TIMEOUT, router.recv()).await.unwrap().unwrap();
+    let (id_b, _, _, _) = parse_router_frames(&msg_b);
+    registry.record_peer(id_b);
+
+    // Now Router sends targeted message: "private message|alice"
+    let (msg_text, target) = parse_router_input("private message|alice");
+    let target_id = registry.find_peer(&target.unwrap()).unwrap();
+    let router_msg = build_router_message(target_id, &resolve_dealer_topic("*"), Bytes::from(msg_text));
+    router.send(router_msg).await.unwrap();
+
+    // Alice should receive it
+    let msg_for_alice = tokio::time::timeout(RECV_TIMEOUT, dealer_a.recv()).await.unwrap().unwrap();
+    let (_, alice_payload) = parse_dealer_frames(&msg_for_alice);
+    assert_eq!(alice_payload, "private message");
+
+    // Bob should NOT receive it (timeout)
+    let bob_result = tokio::time::timeout(Duration::from_millis(200), dealer_b.recv()).await;
+    assert!(bob_result.is_err(), "Bob should not have received a message directed to Alice");
+}
+
+// AC-E2E-13: Router --ack automatically responds with ACK to sender
+#[tokio::test]
+async fn ac_e2e_13_router_ack_flow() {
+    use super::dealer_mode::{build_dealer_message, format_dealer_line, parse_dealer_frames, resolve_dealer_topic};
+    use super::router_mode::{build_ack_message, parse_router_frames};
+    use zeromq::{DealerSocket, RouterSocket};
+
+    let mut router = RouterSocket::new();
+    let endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut dealer = DealerSocket::new();
+    dealer.connect(&endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    dealer.send(build_dealer_message(&resolve_dealer_topic("*"), Bytes::from_static(b"data"))).await.unwrap();
+
+    let r_msg = tokio::time::timeout(RECV_TIMEOUT, router.recv()).await.unwrap().unwrap();
+    let (raw_id, _, _, _) = parse_router_frames(&r_msg);
+
+    // Simulate router --ack auto reply
+    let ack = build_ack_message(raw_id);
+    router.send(ack).await.unwrap();
+
+    let d_msg = tokio::time::timeout(RECV_TIMEOUT, dealer.recv()).await.unwrap().unwrap();
+    let (topic, payload) = parse_dealer_frames(&d_msg);
+    assert_eq!(topic, "");
+    assert_eq!(payload, "ACK");
+    assert_eq!(format_dealer_line(1, &topic, &payload), "[1]  => ACK");
+}
+
+// AC-E2E-14: Router sending to unknown identity silently drops without panic
+#[tokio::test]
+async fn ac_e2e_14_router_send_to_unknown_identity_drops_silently() {
+    use super::dealer_mode::resolve_dealer_topic;
+    use super::router_mode::build_router_message;
+    use zeromq::RouterSocket;
+
+    let mut router = RouterSocket::new();
+    let _endpoint = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let fake_id = Bytes::from_static(b"non-existent");
+    let msg = build_router_message(fake_id, &resolve_dealer_topic("*"), Bytes::from_static(b"drop me"));
+    // Simulating Router sending behavior: silently drop errors
+    let _ = router.send(msg).await;
+}
+

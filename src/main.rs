@@ -1,17 +1,16 @@
 use clap::{Parser, ValueEnum};
 
 mod modes;
-use modes::{pub_mode, sub_mode};
-
+use modes::{dealer_mode, pub_mode, router_mode, sub_mode};
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct ZmqArgs {
-    /// Operation mode: 'Pub' to publish, 'Sub' to subscribe
+    /// Operation mode: 'Pub', 'Sub', 'Dealer', or 'Router'
     #[arg(long, value_enum, ignore_case = true)]
     pub mode: Mode,
 
-    /// If set, bind to endpoint; otherwise, connect (default: false).
+    /// If set, bind to endpoint; otherwise, connect (default: false, Router always binds).
     #[arg(long, default_value_t = false)]
     pub bind: bool,
 
@@ -19,7 +18,7 @@ pub struct ZmqArgs {
     #[arg(long)]
     pub endpoint: String,
 
-    /// Optional topic for PUB/SUB filtering (default: "*")
+    /// Optional topic for PUB/SUB filtering or DEALER/ROUTER frame prefix (default: "*")
     #[arg(long, default_value = "*")]
     pub topic: String,
 
@@ -34,13 +33,37 @@ pub struct ZmqArgs {
     /// Throttle interval in milliseconds for binary file streaming (default: 100, 0 to disable)
     #[arg(long, default_value_t = 100)]
     pub throttle_interval_ms: u64,
+
+    /// Socket identity for DEALER / ROUTER modes
+    #[arg(long)]
+    pub identity: Option<String>,
+
+    /// Enable automatic ACK replies for ROUTER mode
+    #[arg(long, default_value_t = false)]
+    pub ack: bool,
 }
 
-/// Mode enum for publish/subscribe (used with clap's ValueEnum)
+/// Mode enum for publish/subscribe/dealer/router (used with clap's ValueEnum)
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum Mode {
     Pub,
     Sub,
+    Dealer,
+    Router,
+}
+
+/// Validates argument combinations across modes.
+pub fn validate_args(args: &ZmqArgs) -> Result<(), &'static str> {
+    if args.ack && args.mode != Mode::Router {
+        return Err("--ack is only valid in router mode");
+    }
+    if args.identity.is_some() && args.mode != Mode::Dealer && args.mode != Mode::Router {
+        return Err("--identity is only valid in dealer or router mode");
+    }
+    if args.file.is_some() && (args.mode == Mode::Dealer || args.mode == Mode::Router) {
+        return Err("--file is not supported in dealer or router mode");
+    }
+    Ok(())
 }
 
 /// Formats an error into a user-friendly message with context.
@@ -50,18 +73,18 @@ pub fn format_error(e: &(dyn std::error::Error + 'static), mode: Mode, endpoint:
         let (local_sock, allowed_peer) = match mode {
             Mode::Pub => ("PUB", "SUB or XSUB"),
             Mode::Sub => ("SUB", "PUB or XPUB"),
+            Mode::Dealer => ("DEALER", "ROUTER, DEALER, or REP"),
+            Mode::Router => ("ROUTER", "DEALER, ROUTER, or REQ"),
         };
         format!(
             "Error: Provided sockets combination is not compatible\n\n\
             [Socket Incompatibility Explanation]\n\
             - Local socket: {} (mode: {:?})\n\
             - Target endpoint: {}\n\
-            - A {} socket can ONLY connect to a {} socket.\n\
-            - PUB-to-PUB and SUB-to-SUB connections are NOT allowed by ZeroMQ.\n\n\
+            - A {} socket can ONLY connect to a {} socket.\n\n\
             [Troubleshooting]\n\
-            1. Ensure you didn't launch both instances in the same mode (e.g. both pub or both sub).\n\
-            2. If you are running a publisher and subscriber, ensure one is 'pub' and the other is 'sub'.\n\
-            3. Verify that the port '{}' is not already in use by an incompatible ZeroMQ socket or service.",
+            1. Ensure both sides are running compatible socket modes (e.g. PUB<->SUB or DEALER<->ROUTER).\n\
+            2. Verify that the port '{}' is not already in use by an incompatible ZeroMQ socket or service.",
             local_sock, mode, endpoint, local_sock, allowed_peer, endpoint
         )
     } else {
@@ -73,9 +96,16 @@ pub fn format_error(e: &(dyn std::error::Error + 'static), mode: Mode, endpoint:
 async fn main() {
     let args = ZmqArgs::parse();
 
+    if let Err(e) = validate_args(&args) {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+
     let res = match args.mode {
         Mode::Pub => pub_mode::run_publisher(args.clone()).await,
         Mode::Sub => sub_mode::run_subscriber(args.clone()).await,
+        Mode::Dealer => dealer_mode::run_dealer(args.clone()).await,
+        Mode::Router => router_mode::run_router(args.clone()).await,
     };
 
     if let Err(e) = res {
@@ -105,6 +135,8 @@ mod tests {
         assert_eq!(a.file, None);
         assert_eq!(a.batch_size, 1000);
         assert_eq!(a.throttle_interval_ms, 100);
+        assert_eq!(a.identity, None);
+        assert!(!a.ack);
     }
 
     // AC-CLI-02: missing required arguments are rejected.
@@ -115,7 +147,7 @@ mod tests {
         assert!(parse(&[]).is_err());
     }
 
-    // AC-CLI-03: --mode is case-insensitive and limited to pub|sub.
+    // AC-CLI-03: --mode is case-insensitive and limited to pub|sub|dealer|router.
     #[test]
     fn ac_cli_03_mode_is_case_insensitive_and_validated() {
         for m in ["pub", "PUB", "Pub"] {
@@ -125,6 +157,14 @@ mod tests {
         for m in ["sub", "SUB", "Sub"] {
             let a = parse(&["--mode", m, "--endpoint", "e"]).unwrap();
             assert!(matches!(a.mode, Mode::Sub), "{m}");
+        }
+        for m in ["dealer", "DEALER", "Dealer"] {
+            let a = parse(&["--mode", m, "--endpoint", "e"]).unwrap();
+            assert!(matches!(a.mode, Mode::Dealer), "{m}");
+        }
+        for m in ["router", "ROUTER", "Router"] {
+            let a = parse(&["--mode", m, "--endpoint", "e"]).unwrap();
+            assert!(matches!(a.mode, Mode::Router), "{m}");
         }
         assert!(parse(&["--mode", "req", "--endpoint", "e"]).is_err());
     }
@@ -158,6 +198,10 @@ mod tests {
         assert!(msg.contains("PUB"));
         assert!(msg.contains("SUB or XSUB"));
         assert!(msg.contains("tcp://127.0.0.1:5555"));
+
+        let msg_dlr = format_error(&err, Mode::Dealer, "tcp://127.0.0.1:5555");
+        assert!(msg_dlr.contains("DEALER"));
+        assert!(msg_dlr.contains("ROUTER, DEALER, or REP"));
     }
 
     // AC-CLI-06: throttling options accept numbers (0 allowed) and reject garbage/negatives.
@@ -183,6 +227,50 @@ mod tests {
     fn ac_cli_07_legacy_buf_and_hwm_are_rejected() {
         assert!(parse(&["--mode", "pub", "--endpoint", "e", "--buf", "1024"]).is_err());
         assert!(parse(&["--mode", "pub", "--endpoint", "e", "--hwm", "1000"]).is_err());
+    }
+
+    // AC-CLI-08 & 09: identity and ack flags parsing and defaults
+    #[test]
+    fn ac_cli_08_and_09_identity_and_ack() {
+        let a = parse(&["--mode", "router", "--endpoint", "e", "--identity", "srv1", "--ack"]).unwrap();
+        assert_eq!(a.identity.as_deref(), Some("srv1"));
+        assert!(a.ack);
+
+        let d = parse(&["--mode", "dealer", "--endpoint", "e"]).unwrap();
+        assert_eq!(d.identity, None);
+        assert!(!d.ack);
+    }
+
+    // AC-CLI-10: validate_args combinations
+    #[test]
+    fn ac_cli_10_validate_args_combinations() {
+        // Valid dealer/router
+        let ok_dealer = parse(&["--mode", "dealer", "--endpoint", "e", "--identity", "c1"]).unwrap();
+        assert!(validate_args(&ok_dealer).is_ok());
+
+        let ok_router = parse(&["--mode", "router", "--endpoint", "e", "--identity", "r1", "--ack"]).unwrap();
+        assert!(validate_args(&ok_router).is_ok());
+
+        // --ack on non-router is rejected
+        let bad_ack_dealer = parse(&["--mode", "dealer", "--endpoint", "e", "--ack"]).unwrap();
+        assert_eq!(validate_args(&bad_ack_dealer), Err("--ack is only valid in router mode"));
+
+        let bad_ack_sub = parse(&["--mode", "sub", "--endpoint", "e", "--ack"]).unwrap();
+        assert_eq!(validate_args(&bad_ack_sub), Err("--ack is only valid in router mode"));
+
+        // --identity on pub/sub is rejected
+        let bad_id_pub = parse(&["--mode", "pub", "--endpoint", "e", "--identity", "p"]).unwrap();
+        assert_eq!(validate_args(&bad_id_pub), Err("--identity is only valid in dealer or router mode"));
+
+        let bad_id_sub = parse(&["--mode", "sub", "--endpoint", "e", "--identity", "s"]).unwrap();
+        assert_eq!(validate_args(&bad_id_sub), Err("--identity is only valid in dealer or router mode"));
+
+        // --file on dealer/router is rejected
+        let bad_file_dealer = parse(&["--mode", "dealer", "--endpoint", "e", "--file", "f.txt"]).unwrap();
+        assert_eq!(validate_args(&bad_file_dealer), Err("--file is not supported in dealer or router mode"));
+
+        let bad_file_router = parse(&["--mode", "router", "--endpoint", "e", "--file", "f.txt"]).unwrap();
+        assert_eq!(validate_args(&bad_file_router), Err("--file is not supported in dealer or router mode"));
     }
 }
 
