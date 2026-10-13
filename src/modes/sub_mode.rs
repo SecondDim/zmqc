@@ -16,7 +16,7 @@ pub async fn run_subscriber(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> 
     let mut socket = SubSocket::new();
     let endpoint = &args.endpoint;
 
-    if args.bind {
+    if args.is_bind() {
         socket.bind(endpoint).await?;
         println!("SUB bound to {}", endpoint);
     } else {

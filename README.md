@@ -6,19 +6,20 @@
 
 ## English
 
-`zmqc` is a lightweight ZeroMQ (ZMQ) command-line testing utility written in Rust. Powered by a **pure Rust** architecture using `zeromq` and `tokio` async runtime, it supports **Publisher (PUB)**, **Subscriber (SUB)**, **Dealer**, and **Router** modes. It is ideal for debugging, testing ZMQ network topologies, and rapidly verifying message exchanges.
+`zmqc` is a lightweight ZeroMQ (ZMQ) command-line testing utility written in Rust. Powered by a **pure Rust** architecture using `zeromq` and `tokio` async runtime, it supports **Publisher (PUB)**, **Subscriber (SUB)**, **Dealer**, **Router**, and **Proxy (XPUB/XSUB)** modes. It is ideal for debugging, testing ZMQ network topologies, and rapidly verifying message exchanges.
 
 ### 💡 Features
 
 *   **Pure Rust Implementation**: Built on `zeromq` and `tokio`—no need to install or compile C/C++ `libzmq` development libraries, with zero dependency on `libzmq.dll`.
 *   **Asynchronous High-Performance I/O**: Fully asynchronous, event-driven architecture with complete decoupling of network communication and disk I/O.
-*   **Multiple Socket Modes**: Supports Publisher (PUB), Subscriber (SUB), Dealer, and Router modes.
-*   **Flexible Connection Types**: Supports binding to an endpoint (`--bind`) or connecting to an endpoint (default).
+*   **Multiple Socket Modes**: Supports Publisher (PUB), Subscriber (SUB), Dealer, Router, and Proxy (XPUB/XSUB) modes.
+*   **Flexible Connection Types**: Supports binding to an endpoint (`--bind`, supporting `--bind=false`), connecting via `--connect`, and specialized relay binding (`--relay-bind`).
 *   **Topic Filtering**: Supports filtering messages by topic (`--topic`) when publishing or subscribing.
 *   **Throughput Throttling**: Binary file streaming supports fine-grained rate limiting via `--batch-size` and `--throttle-interval-ms`.
 *   **File Streaming**:
     *   **Publish Mode**: Read and publish file contents (`--file`). Reads line-by-line for UTF-8 text files; parses custom binary stream format for binary files.
     *   **Subscribe Mode**: Write received messages to a specified file (`--file`), featuring Tokio MPSC queued writing, periodic background flushing (every 3 seconds), overwrite protection prompts, and graceful shutdown on Ctrl+C (draining in-memory buffers before flushing).
+*   **Proxy Broker**: Facilitates XPUB/XSUB message forwarding and dynamic subscription forwarding between publishers and subscribers, featuring quiet statistics summary and `--debug` live stream inspection.
 *   **Hex Fallback Display**: Automatically converts non-UTF-8 binary payloads into hexadecimal (Hex) string representations for display.
 
 ---
@@ -72,11 +73,15 @@ Run `zmqc --help` to view full help details. Below are the primary arguments:
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--mode <pub\|sub\|dealer\|router>` | Required | - | Operating mode: `pub`, `sub`, `dealer`, or `router` (case-insensitive). |
-| `--endpoint <url>` | Required | - | ZeroMQ endpoint address (e.g. `tcp://127.0.0.1:5555`). |
-| `--bind` | Flag | `false` | If specified, the socket executes `bind`; defaults to `connect` (**ROUTER mode is always forced to bind**). |
-| `--topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame, otherwise sends the specified topic frame. |
-| `--file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**not supported in DEALER/ROUTER**). |
+| `--mode <pub\|sub\|dealer\|router\|proxy>` | Required | - | Operating mode: `pub`, `sub`, `dealer`, `router`, or `proxy` (case-insensitive). |
+| `--endpoint <url>` | Required | - | ZeroMQ endpoint address (e.g. `tcp://127.0.0.1:5555`). In **proxy** mode, acts as the XPUB endpoint. |
+| `--relay-endpoint <url>` | Optional | - | **Proxy mode only (required)**: ZeroMQ endpoint address for the XSUB socket connecting to upstream publishers. |
+| `--bind` | Flag/Bool | `false` (XPUB/Router: `true`) | If specified (or `--bind=true`), the socket executes `bind`; supports `--bind=false`. Defaults to `bind` in Proxy (XPUB) and Router; defaults to `connect` in Pub, Sub, Dealer. |
+| `--connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes. |
+| `--relay-bind` | Flag | `false` | **Proxy mode only**: If specified, the XSUB socket executes `bind` (defaults to `connect`). |
+| `--debug` | Flag | `false` | **Proxy mode only**: Enables verbose live console output for forwarded data and subscription events. |
+| `--topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY mode**: ignored with a warning. |
+| `--file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY**). |
 | `--identity <string>` | Optional | - | **DEALER / ROUTER mode**: Specify custom ZeroMQ Socket Identity. |
 | `--ack` | Flag | `false` | **ROUTER mode**: Automatically reply `ACK` to the source peer upon receiving any message. |
 | `--batch-size <int>` | Optional | `1000` | Batch size for binary file streaming. |
@@ -116,6 +121,22 @@ Both `dealer` and `router` are **bidirectional modes** (capable of simultaneous 
         *   `--ack` can be used simultaneously with manual sending via stdin.
 *   **stdin EOF Protection**:
     *   When piped input ends (e.g. `echo msg | zmqc --mode dealer ...`), the program does not terminate prematurely. It displays a notification and continues listening for replies in the background until Ctrl+C is pressed.
+
+#### 4. PROXY Mode: XPUB / XSUB Message Broker
+`proxy` mode creates a high-performance central intermediary for PUB/SUB topologies:
+*   **XPUB Socket (Backend)**: Binds to `--endpoint` by default (can connect via `--connect` or `--bind=false`). Downstream subscribers connect to this endpoint.
+*   **XSUB Socket (Frontend)**: Connects to `--relay-endpoint` by default (can bind via `--relay-bind`). Upstream publishers publish to this endpoint.
+*   **Bi-directional Dynamic Forwarding**:
+    *   `XSUB -> XPUB`: Forwards published messages from publishers to subscribers matching topic subscriptions.
+    *   `XPUB -> XSUB`: Forwards subscription/unsubscription requests from subscribers up to publishers.
+*   **Quiet Mode & Exit Statistics**:
+    *   Runs quietly by default.
+    *   On `Ctrl+C`, prints summary statistics: `Proxy summary: forwarded X data message(s), Y subscription event(s).`
+*   **Live Inspection (`--debug`)**:
+    *   Shows data messages in real-time: `[RELAY] [{seq}] {topic} => {payload}`.
+    *   Shows subscription events: `[SUB] subscribe '{topic}'` or `[SUB] unsubscribe '{topic}'`.
+*   **Graceful Flag Handling**:
+    *   `--topic` and `--file` are ignored with a warning and do not halt execution.
 
 ---
 
@@ -163,6 +184,23 @@ zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --bind --topic my_topic --file m
 3.  **Router Replies to a Specific Peer**:
     Type `hi alice|alice` in the Router console, and the message will be precisely routed to `alice`.
 
+#### Example 5: Proxy Broker Architecture
+
+1.  **Start Proxy Broker** (XPUB listening on 5556, XSUB listening on 5555, debug output enabled):
+    ```bash
+    zmqc --mode proxy --endpoint tcp://127.0.0.1:5556 --relay-endpoint tcp://127.0.0.1:5555 --relay-bind --debug
+    ```
+
+2.  **Start Subscriber** (connects to Proxy XPUB):
+    ```bash
+    zmqc --mode sub --endpoint tcp://127.0.0.1:5556 --topic sensor
+    ```
+
+3.  **Start Publisher** (connects to Proxy XSUB):
+    ```bash
+    zmqc --mode pub --bind --endpoint tcp://127.0.0.1:5555 --topic sensor
+    ```
+
 ---
 
 ### 🛠️ Development & Maintenance Commands
@@ -182,19 +220,20 @@ Recommended tools for maintaining project dependencies:
 
 ## 繁體中文
 
-`zmqc` 是一個使用 Rust 語言編寫的輕量型 ZeroMQ (ZMQ) 命令列測試工具，採用 **純 Rust** 的 `zeromq` 與 `tokio` 非同步架構，支援 **發布者 (Publisher)**、**訂閱者 (Subscriber)**、**Dealer** 與 **Router** 模式。它非常適合用於除錯、測試 ZMQ 網路拓撲，以及快速驗證訊息傳遞。
+`zmqc` 是一個使用 Rust 語言編寫的輕量型 ZeroMQ (ZMQ) 命令列測試工具，採用 **純 Rust** 的 `zeromq` 與 `tokio` 非同步架構，支援 **發布者 (Publisher)**、**訂閱者 (Subscriber)**、**Dealer**、**Router** 與 **Proxy (XPUB/XSUB)** 模式。它非常適合用於除錯、測試 ZMQ 網路拓撲，以及快速驗證訊息傳遞。
 
 ### 💡 功能特色
 
 *   **純 Rust 實現**：基於 `zeromq` 與 `tokio`，無需安裝或編譯 C/C++ `libzmq` 開發庫，亦無需依賴 `libzmq.dll`。
 *   **非同步高效能 I/O**：全非同步事件驅動架構，通訊與磁碟 I/O 全面解耦。
-*   **多種模式支援**：支援發布者（PUB）、訂閱者（SUB）、Dealer 與 Router 運作模式。
-*   **靈活的連線方式**：支援綁定端點（`--bind`）或連線端點（預設）。
+*   **多種模式支援**：支援發布者（PUB）、訂閱者（SUB）、Dealer、Router 與代理中繼（Proxy）運作模式。
+*   **靈活的連線方式**：支援綁定端點（`--bind`，支援 `--bind=false`）、顯式連線端點（`--connect`）與中繼端點綁定（`--relay-bind`）。
 *   **訊息主題過濾**：發布或接收時支援透過主題（`--topic`）進行過濾。
 *   **發送流量節流**：二進位檔案串流支援 `--batch-size` 與 `--throttle-interval-ms` 彈性調控。
 *   **檔案串流處理**：
     *   **發布模式**：可讀取檔案（`--file`）內容並發送。若為 UTF-8 文字，則逐行讀取；若為二進位檔案，則解析自定義二進位格式串流。
     *   **訂閱模式**：可將接收到的訊息寫入指定檔案（`--file`），具有 Tokio MPSC 佇列寫入、背景定期同步（每 3 秒自動 flush）、覆蓋保護提示，以及 Ctrl+C 優雅退出（排空記憶體緩衝後 flush）。
+*   **Proxy 代理中繼**：基於 XPUB/XSUB 提供訊息與動態訂閱雙向轉發，預設安靜模式並於退出時輸出統計，支援 `--debug` 即時串流監看。
 *   **Hex 降級顯示**：對於非 UTF-8 的二進位訊息，自動轉換為十六進位（Hex）字串輸出。
 
 ---
@@ -248,11 +287,15 @@ cargo build --release
 
 | 參數 | 類型 | 預設值 | 說明 |
 | :--- | :--- | :--- | :--- |
-| `--mode <pub\|sub\|dealer\|router>` | 必填 | - | 運作模式：`pub`、`sub`、`dealer` 或 `router`，不區分大小寫。 |
-| `--endpoint <url>` | 必填 | - | ZeroMQ 端點位址。例如 `tcp://127.0.0.1:5555`。 |
-| `--bind` | 開關 | `false` | 若加上此參數，Socket 會執行 `bind`；預設為 `connect`（**ROUTER 模式永遠強制為 bind**）。 |
-| `--topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame，否則帶入指定 topic frame。 |
-| `--file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援**）。 |
+| `--mode <pub\|sub\|dealer\|router\|proxy>` | 必填 | - | 運作模式：`pub`、`sub`、`dealer`、`router` 或 `proxy`，不區分大小寫。 |
+| `--endpoint <url>` | 必填 | - | ZeroMQ 端點位址。在 **proxy** 模式中為 XPUB 端點位址。 |
+| `--relay-endpoint <url>` | 選填 | - | **Proxy 模式專用（必填）**：XSUB 端點位址，連接上游 Publisher。 |
+| `--bind` | 開關/布林 | `false` (XPUB/Router: `true`) | 若加上此參數，Socket 執行 `bind`；支援 `--bind=false`。Proxy (XPUB) 與 Router 預設為 `bind`；其餘模式預設為 `connect`。 |
+| `--connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式。 |
+| `--relay-bind` | 開關 | `false` | **Proxy 模式專用**：若加上此參數，XSUB 端點執行 `bind`（預設為 `connect`）。 |
+| `--debug` | 開關 | `false` | **Proxy 模式專用**：即時輸出轉發資料 (`[RELAY]`) 與訂閱事件 (`[SUB]`)。 |
+| `--topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY 模式**：忽略並輸出警告。 |
+| `--file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY 模式忽略並輸出警告**）。 |
 | `--identity <string>` | 選填 | - | **DEALER / ROUTER 模式**：指定自己的 ZeroMQ Socket Identity。 |
 | `--ack` | 開關 | `false` | **ROUTER 模式**：收到任何訊息時自動回覆 `ACK` 給來源 Peer。 |
 | `--batch-size <int>` | 選填 | `1000` | 二進位檔案串流發送的批次大小。 |
@@ -292,6 +335,22 @@ cargo build --release
         *   `--ack` 與 stdin 手動發送可同時並存使用。
 *   **stdin 結束（EOF）保護**：
     *   當以管線輸入資料（例如 `echo msg | zmqc --mode dealer ...`）結束時，程式不會直接退出，而是提示並持續在背景接收回覆，直到按下 Ctrl+C 結束。
+
+#### 4. PROXY 模式：XPUB / XSUB 訊息中繼站
+`proxy` 模式建立一個高效能中央代理，用於連接多個發布者與多個訂閱者：
+*   **XPUB Socket（後端）**：預設 `bind` 於 `--endpoint`（可透過 `--connect` 或 `--bind=false` 改為連線），提供下游 Subscriber 連線。
+*   **XSUB Socket（前端）**：預設 `connect` 於 `--relay-endpoint`（可透過 `--relay-bind` 改為 bind），連接上游 Publisher。
+*   **雙向動態轉發**：
+    *   `XSUB -> XPUB`：將 Publisher 送出的資料訊息轉發給符合訂閱主題的 Subscriber。
+    *   `XPUB -> XSUB`：將 Subscriber 送入的訂閱/退訂請求向上傳遞給 Publisher。
+*   **安靜模式與結束統計**：
+    *   預設在背景安靜轉發。
+    *   按下 `Ctrl+C` 結束時印出總結統計：`Proxy summary: forwarded X data message(s), Y subscription event(s).`
+*   **即時監控 (`--debug`)**：
+    *   即時輸出資料訊息：`[RELAY] [{序號}] {topic} => {payload}`。
+    *   即時輸出訂閱事件：`[SUB] subscribe '{topic}'` 或 `[SUB] unsubscribe '{topic}'`。
+*   **參數容錯**：
+    *   若傳入 `--topic` 或 `--file`，會印出 Warning 提示並自動忽略，維持正常運作。
 
 ---
 
@@ -334,10 +393,27 @@ zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --bind --topic my_topic --file m
     ```bash
     zmqc --mode dealer --endpoint tcp://127.0.0.1:5560 --identity alice --topic chat
     ```
-    在 Dealer 輸入 `hello`，Router 端即會收到 `[1] alice chat => hello`，且 Dealer 端會立即收到自動回覆 `[1]  => ACK`。
+    在 Dealer 輸入 `hello`，Router 端即會收到 `[1] alice chat => hello`, 且 Dealer 端會立即收到自動回覆 `[1]  => ACK`。
 
 3.  **Router 端指定回覆給特定 Peer**：
     在 Router 端輸入 `hi alice|alice`，訊息即會精準路由至 `alice` 端。
+
+#### 範例 5：Proxy 訊息中繼中介站架構
+
+1.  **啟動 Proxy 中繼站**（XPUB 監聽 5556，XSUB 監聽 5555，並開啟 `--debug`）：
+    ```bash
+    zmqc --mode proxy --endpoint tcp://127.0.0.1:5556 --relay-endpoint tcp://127.0.0.1:5555 --relay-bind --debug
+    ```
+
+2.  **啟動訂閱者**（連線到 Proxy XPUB 5556）：
+    ```bash
+    zmqc --mode sub --endpoint tcp://127.0.0.1:5556 --topic sensor
+    ```
+
+3.  **啟動發布者**（連線到 Proxy XSUB 5555）：
+    ```bash
+    zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --topic sensor
+    ```
 
 ---
 

@@ -36,7 +36,7 @@ pub async fn run_publisher(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let mut socket = PubSocket::new();
     let endpoint = &args.endpoint;
 
-    if args.bind {
+    if args.is_bind() {
         socket.bind(endpoint).await?;
         println!("PUB bound to {}", endpoint);
     } else {

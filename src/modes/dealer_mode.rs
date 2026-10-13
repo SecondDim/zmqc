@@ -58,7 +58,7 @@ pub async fn run_dealer(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     };
 
     let endpoint = &args.endpoint;
-    if args.bind {
+    if args.is_bind() {
         socket.bind(endpoint).await?;
         println!("DEALER bound to {}", endpoint);
     } else {

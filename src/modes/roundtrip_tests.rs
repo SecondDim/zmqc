@@ -6,7 +6,7 @@ use super::sub_mode::{format_message_line, parse_message_frames};
 use super::test_util::TempPath;
 use bytes::Bytes;
 use std::time::Duration;
-use zeromq::{PubSocket, Socket, SocketRecv, SocketSend, SubSocket, ZmqMessage};
+use zeromq::{PubSocket, Socket, SocketRecv, SocketSend, SubSocket, XPubSocket, XSubSocket, ZmqMessage};
 
 const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// Time for the SUB handshake + subscription to propagate (the "slow joiner" window).
@@ -363,4 +363,173 @@ async fn ac_e2e_14_router_send_to_unknown_identity_drops_silently() {
     // Simulating Router sending behavior: silently drop errors
     let _ = router.send(msg).await;
 }
+
+// AC-E2E-15: Proxy forwards messages from Publisher to Subscriber
+#[tokio::test]
+async fn ac_e2e_15_proxy_pub_to_sub_forwarding() {
+    let mut proxy_xsub = XSubSocket::new();
+    let xsub_endpoint = proxy_xsub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut proxy_xpub = XPubSocket::new();
+    let xpub_endpoint = proxy_xpub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let proxy_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                data_msg = proxy_xsub.recv() => {
+                    match data_msg {
+                        Ok(msg) => {
+                            if proxy_xpub.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                sub_msg = proxy_xpub.recv() => {
+                    match sub_msg {
+                        Ok(msg) => {
+                            if proxy_xsub.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+
+    let mut sub = connected_subscriber(&xpub_endpoint, "telemetry").await;
+
+    let mut pub_sock = PubSocket::new();
+    pub_sock.connect(&xsub_endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    pub_sock
+        .send_two_part(&Bytes::from_static(b"telemetry"), Bytes::from_static(b"42.0"))
+        .await
+        .unwrap();
+
+    let (topic, payload) = parse_message_frames(&recv(&mut sub).await);
+    assert_eq!(format_message_line(1, &topic, &payload), "[1] telemetry => 42.0");
+
+    proxy_handle.abort();
+}
+
+// AC-E2E-16: Proxy forwards wildcard subscriptions
+#[tokio::test]
+async fn ac_e2e_16_proxy_wildcard_subscription() {
+    let mut proxy_xsub = XSubSocket::new();
+    let xsub_endpoint = proxy_xsub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut proxy_xpub = XPubSocket::new();
+    let xpub_endpoint = proxy_xpub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let proxy_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                data_msg = proxy_xsub.recv() => {
+                    match data_msg {
+                        Ok(msg) => {
+                            if proxy_xpub.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                sub_msg = proxy_xpub.recv() => {
+                    match sub_msg {
+                        Ok(msg) => {
+                            if proxy_xsub.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+
+    let mut sub = connected_subscriber(&xpub_endpoint, "").await;
+
+    let mut pub_sock = PubSocket::new();
+    pub_sock.connect(&xsub_endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    for (t, p) in [("alpha", "1"), ("beta", "2")] {
+        pub_sock
+            .send_two_part(&Bytes::copy_from_slice(t.as_bytes()), Bytes::copy_from_slice(p.as_bytes()))
+            .await
+            .unwrap();
+    }
+
+    let (t1, p1) = parse_message_frames(&recv(&mut sub).await);
+    let (t2, p2) = parse_message_frames(&recv(&mut sub).await);
+    assert_eq!((t1.as_str(), p1.as_str()), ("alpha", "1"));
+    assert_eq!((t2.as_str(), p2.as_str()), ("beta", "2"));
+
+    proxy_handle.abort();
+}
+
+// AC-E2E-17: Proxy topic filtering downstream drops unwanted messages
+#[tokio::test]
+async fn ac_e2e_17_proxy_topic_filtering_downstream() {
+    let mut proxy_xsub = XSubSocket::new();
+    let xsub_endpoint = proxy_xsub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut proxy_xpub = XPubSocket::new();
+    let xpub_endpoint = proxy_xpub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let proxy_handle = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                data_msg = proxy_xsub.recv() => {
+                    match data_msg {
+                        Ok(msg) => {
+                            if proxy_xpub.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                sub_msg = proxy_xpub.recv() => {
+                    match sub_msg {
+                        Ok(msg) => {
+                            if proxy_xsub.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    });
+
+    let mut sub = connected_subscriber(&xpub_endpoint, "target_topic").await;
+
+    let mut pub_sock = PubSocket::new();
+    pub_sock.connect(&xsub_endpoint).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    // Send irrelevant message, then relevant message
+    pub_sock
+        .send_two_part(&Bytes::from_static(b"ignored"), Bytes::from_static(b"skip"))
+        .await
+        .unwrap();
+    pub_sock
+        .send_two_part(&Bytes::from_static(b"target_topic"), Bytes::from_static(b"keep"))
+        .await
+        .unwrap();
+
+    let (topic, payload) = parse_message_frames(&recv(&mut sub).await);
+    assert_eq!((topic.as_str(), payload.as_str()), ("target_topic", "keep"));
+
+    proxy_handle.abort();
+}
+
 
