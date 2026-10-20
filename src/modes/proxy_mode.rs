@@ -73,6 +73,26 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let mut xpub = XPubSocket::new();
     let mut xsub = XSubSocket::new();
 
+    let _xpub_monitor_handle = if args.monitor {
+        Some(super::monitor::spawn_socket_monitor(
+            xpub.monitor(),
+            Some("[XPUB]"),
+            args.debug,
+        ))
+    } else {
+        None
+    };
+
+    let _xsub_monitor_handle = if args.monitor {
+        Some(super::monitor::spawn_socket_monitor(
+            xsub.monitor(),
+            Some("[XSUB]"),
+            args.debug,
+        ))
+    } else {
+        None
+    };
+
     let xpub_bind = crate::resolve_bind_flag(args.mode, args.bind, args.connect);
     if xpub_bind {
         xpub.bind(&args.endpoint).await?;

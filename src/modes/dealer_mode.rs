@@ -57,6 +57,16 @@ pub async fn run_dealer(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
         DealerSocket::new()
     };
 
+    let _monitor_handle = if args.monitor {
+        Some(super::monitor::spawn_socket_monitor(
+            socket.monitor(),
+            None,
+            args.debug,
+        ))
+    } else {
+        None
+    };
+
     let endpoint = &args.endpoint;
     if args.is_bind() {
         socket.bind(endpoint).await?;

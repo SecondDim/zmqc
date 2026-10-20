@@ -54,7 +54,11 @@ pub struct ZmqArgs {
     #[arg(long, default_value_t = false)]
     pub ack: bool,
 
-    /// Enable verbose debug output for forwarded messages in Proxy mode
+    /// Monitor and display peer connection and disconnection events
+    #[arg(long, default_value_t = false)]
+    pub monitor: bool,
+
+    /// Enable verbose debug output (shows all internal socket events when used with --monitor)
     #[arg(long, default_value_t = false)]
     pub debug: bool,
 }
@@ -112,9 +116,6 @@ pub fn validate_args(args: &ZmqArgs) -> Result<(), &'static str> {
     }
     if args.mode != Mode::Proxy && args.relay_bind {
         return Err("--relay-bind is only valid in proxy mode");
-    }
-    if args.mode != Mode::Proxy && args.debug {
-        return Err("--debug is only valid in proxy mode");
     }
     Ok(())
 }
@@ -196,6 +197,7 @@ mod tests {
         assert_eq!(a.throttle_interval_ms, 100);
         assert_eq!(a.identity, None);
         assert!(!a.ack);
+        assert!(!a.monitor);
         assert!(!a.debug);
     }
 
@@ -461,12 +463,9 @@ mod tests {
             Err("--relay-bind is only valid in proxy mode")
         );
 
-        // --debug on non-proxy mode is rejected
-        let bad_sub_debug = parse(&["--mode", "sub", "--endpoint", "e", "--debug"]).unwrap();
-        assert_eq!(
-            validate_args(&bad_sub_debug),
-            Err("--debug is only valid in proxy mode")
-        );
+        // --debug on non-proxy mode is now allowed globally
+        let sub_debug = parse(&["--mode", "sub", "--endpoint", "e", "--debug"]).unwrap();
+        assert!(validate_args(&sub_debug).is_ok());
     }
 
     // AC-CLI-13: In proxy mode, --topic and --file are allowed (only produce runtime warnings)
@@ -521,5 +520,32 @@ mod tests {
             validate_args(&p_id),
             Err("--identity is only valid in dealer or router mode")
         );
+    }
+
+    // AC-CLI-15: --monitor flag and global --debug flag validation
+    #[test]
+    fn ac_cli_15_monitor_and_global_debug() {
+        let m = parse(&["--mode", "pub", "--endpoint", "e", "--monitor", "--debug"]).unwrap();
+        assert!(m.monitor);
+        assert!(m.debug);
+        assert!(validate_args(&m).is_ok());
+
+        let m_router = parse(&["--mode", "router", "--endpoint", "e", "--monitor"]).unwrap();
+        assert!(m_router.monitor);
+        assert!(!m_router.debug);
+        assert!(validate_args(&m_router).is_ok());
+
+        let m_proxy = parse(&[
+            "--mode",
+            "proxy",
+            "--endpoint",
+            "e",
+            "--relay-endpoint",
+            "pe",
+            "--monitor",
+        ])
+        .unwrap();
+        assert!(m_proxy.monitor);
+        assert!(validate_args(&m_proxy).is_ok());
     }
 }

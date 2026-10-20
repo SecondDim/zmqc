@@ -119,6 +119,16 @@ pub async fn run_router(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
         RouterSocket::new()
     };
 
+    let _monitor_handle = if args.monitor {
+        Some(super::monitor::spawn_socket_monitor(
+            socket.monitor(),
+            None,
+            args.debug,
+        ))
+    } else {
+        None
+    };
+
     let endpoint = &args.endpoint;
     // Router always binds, ignoring args.bind setting
     socket.bind(endpoint).await?;

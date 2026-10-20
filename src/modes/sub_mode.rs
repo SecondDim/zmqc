@@ -14,6 +14,16 @@ const FILE_QUEUE_CAPACITY: usize = 10_000;
 /// Sets up a SUB socket, binds or connects, subscribes to a topic (or all), and receives incoming messages.
 pub async fn run_subscriber(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let mut socket = SubSocket::new();
+    let _monitor_handle = if args.monitor {
+        Some(super::monitor::spawn_socket_monitor(
+            socket.monitor(),
+            None,
+            args.debug,
+        ))
+    } else {
+        None
+    };
+
     let endpoint = &args.endpoint;
 
     if args.is_bind() {

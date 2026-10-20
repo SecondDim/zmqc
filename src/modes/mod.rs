@@ -1,4 +1,5 @@
 pub mod dealer_mode;
+pub mod monitor;
 pub mod proxy_mode;
 pub mod pub_mode;
 pub mod router_mode;

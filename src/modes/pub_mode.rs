@@ -34,6 +34,16 @@ impl TwoPartSender for PubSocket {
 /// Sets up a PUB socket, binds or connects, and publishes lines from file or stdin.
 pub async fn run_publisher(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let mut socket = PubSocket::new();
+    let _monitor_handle = if args.monitor {
+        Some(super::monitor::spawn_socket_monitor(
+            socket.monitor(),
+            None,
+            args.debug,
+        ))
+    } else {
+        None
+    };
+
     let endpoint = &args.endpoint;
 
     if args.is_bind() {

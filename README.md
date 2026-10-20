@@ -20,6 +20,7 @@
     *   **Publish Mode**: Read and publish file contents (`--file`). Reads line-by-line for UTF-8 text files; parses custom binary stream format for binary files.
     *   **Subscribe Mode**: Write received messages to a specified file (`--file`), featuring Tokio MPSC queued writing, periodic background flushing (every 3 seconds), overwrite protection prompts, and graceful shutdown on Ctrl+C (draining in-memory buffers before flushing).
 *   **Proxy Broker**: Facilitates XPUB/XSUB message forwarding and dynamic subscription forwarding between publishers and subscribers, featuring quiet statistics summary and `--debug` live stream inspection.
+*   **Peer Connection Monitoring**: Supports tracking peer connection, disconnection, and handshake events via `--monitor` across all modes, displaying endpoint and identity info (`[PEER] Connected: ...`, `[PEER] Disconnected: ...`).
 *   **Hex Fallback Display**: Automatically converts non-UTF-8 binary payloads into hexadecimal (Hex) string representations for display.
 
 ---
@@ -79,7 +80,8 @@ Run `zmqc --help` to view full help details. Below are the primary arguments:
 | `--bind` | Flag/Bool | `false` (XPUB/Router: `true`) | If specified (or `--bind=true`), the socket executes `bind`; supports `--bind=false`. Defaults to `bind` in Proxy (XPUB) and Router; defaults to `connect` in Pub, Sub, Dealer. |
 | `--connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes. |
 | `--relay-bind` | Flag | `false` | **Proxy mode only**: If specified, the XSUB socket executes `bind` (defaults to `connect`). |
-| `--debug` | Flag | `false` | **Proxy mode only**: Enables verbose live console output for forwarded data and subscription events. |
+| `--monitor` | Flag | `false` | Monitors remote peer connect, disconnect, and handshake failure events (`[PEER] Connected: ...`, `[PEER] Disconnected: ...`). Supported across all modes. |
+| `--debug` | Flag | `false` | Enables live console output for proxy forwarding (`[RELAY]`, `[SUB]`); combined with `--monitor`, outputs internal socket lifecycle events across all modes. |
 | `--topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY mode**: ignored with a warning. |
 | `--file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY**). |
 | `--identity <string>` | Optional | - | **DEALER / ROUTER mode**: Specify custom ZeroMQ Socket Identity. |
@@ -137,6 +139,15 @@ Both `dealer` and `router` are **bidirectional modes** (capable of simultaneous 
     *   Shows subscription events: `[SUB] subscribe '{topic}'` or `[SUB] unsubscribe '{topic}'`.
 *   **Graceful Flag Handling**:
     *   `--topic` and `--file` are ignored with a warning and do not halt execution.
+
+#### 5. Peer Connection Monitoring (`--monitor`)
+Available in all modes (both `bind` and `connect`). Prints peer lifecycle events to the console:
+*   `[PEER] Connected: {endpoint} ({identity})` — a peer connected to a bound socket, or the local socket connected to a remote endpoint.
+*   `[PEER] Disconnected: {identity}` — a peer disconnected.
+*   `[PEER] Accept failed: {error}` — an incoming connection failed during handshake.
+*   In **proxy** mode, events are tagged by role: `[PEER] [XPUB] ...` and `[PEER] [XSUB] ...`.
+*   Add `--debug` to also show internal events (`Listening`, `ConnectDelayed`, `ConnectRetried`, `Closed`, `CloseFailed`).
+*   Identities that are not valid UTF-8 are shown as lowercase hex.
 
 ---
 
@@ -201,6 +212,19 @@ zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --bind --topic my_topic --file m
     zmqc --mode pub --bind --endpoint tcp://127.0.0.1:5555 --topic sensor
     ```
 
+#### Example 6: Peer Connection Monitoring
+
+1.  **Start Router with monitoring**:
+    ```bash
+    zmqc --mode router --endpoint tcp://127.0.0.1:5570 --monitor
+    ```
+
+2.  **Start and then stop a Dealer**:
+    ```bash
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:5570 --identity alice
+    ```
+    The Router prints `[PEER] Connected: tcp://127.0.0.1:xxxxx (alice)` on connect and `[PEER] Disconnected: alice` when the Dealer exits.
+
 ---
 
 ### 🛠️ Development & Maintenance Commands
@@ -234,6 +258,7 @@ Recommended tools for maintaining project dependencies:
     *   **發布模式**：可讀取檔案（`--file`）內容並發送。若為 UTF-8 文字，則逐行讀取；若為二進位檔案，則解析自定義二進位格式串流。
     *   **訂閱模式**：可將接收到的訊息寫入指定檔案（`--file`），具有 Tokio MPSC 佇列寫入、背景定期同步（每 3 秒自動 flush）、覆蓋保護提示，以及 Ctrl+C 優雅退出（排空記憶體緩衝後 flush）。
 *   **Proxy 代理中繼**：基於 XPUB/XSUB 提供訊息與動態訂閱雙向轉發，預設安靜模式並於退出時輸出統計，支援 `--debug` 即時串流監看。
+*   **連線對象監控**：所有模式皆可透過 `--monitor` 追蹤 Peer 連線、斷線與握手失敗事件，並顯示端點與 Identity（`[PEER] Connected: ...`、`[PEER] Disconnected: ...`）。
 *   **Hex 降級顯示**：對於非 UTF-8 的二進位訊息，自動轉換為十六進位（Hex）字串輸出。
 
 ---
@@ -293,7 +318,8 @@ cargo build --release
 | `--bind` | 開關/布林 | `false` (XPUB/Router: `true`) | 若加上此參數，Socket 執行 `bind`；支援 `--bind=false`。Proxy (XPUB) 與 Router 預設為 `bind`；其餘模式預設為 `connect`。 |
 | `--connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式。 |
 | `--relay-bind` | 開關 | `false` | **Proxy 模式專用**：若加上此參數，XSUB 端點執行 `bind`（預設為 `connect`）。 |
-| `--debug` | 開關 | `false` | **Proxy 模式專用**：即時輸出轉發資料 (`[RELAY]`) 與訂閱事件 (`[SUB]`)。 |
+| `--monitor` | 開關 | `false` | 監控遠端 Peer 的連線、斷線與握手失敗事件（`[PEER] Connected: ...`、`[PEER] Disconnected: ...`），適用於所有模式。 |
+| `--debug` | 開關 | `false` | Proxy 模式即時輸出轉發資料 (`[RELAY]`) 與訂閱事件 (`[SUB]`)；搭配 `--monitor` 時，所有模式額外輸出 Socket 內部事件。 |
 | `--topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY 模式**：忽略並輸出警告。 |
 | `--file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY 模式忽略並輸出警告**）。 |
 | `--identity <string>` | 選填 | - | **DEALER / ROUTER 模式**：指定自己的 ZeroMQ Socket Identity。 |
@@ -351,6 +377,15 @@ cargo build --release
     *   即時輸出訂閱事件：`[SUB] subscribe '{topic}'` 或 `[SUB] unsubscribe '{topic}'`。
 *   **參數容錯**：
     *   若傳入 `--topic` 或 `--file`，會印出 Warning 提示並自動忽略，維持正常運作。
+
+#### 5. Peer 連線監控（`--monitor`）
+所有模式皆可使用（`bind` 與 `connect` 皆支援），會在終端機輸出 Peer 生命週期事件：
+*   `[PEER] Connected: {endpoint} ({identity})` — 有 Peer 連入已綁定的 Socket，或本機 Socket 已連上遠端端點。
+*   `[PEER] Disconnected: {identity}` — Peer 斷線。
+*   `[PEER] Accept failed: {error}` — 連入的連線於握手時失敗。
+*   **Proxy** 模式會以角色標籤區分：`[PEER] [XPUB] ...` 與 `[PEER] [XSUB] ...`。
+*   加上 `--debug` 可額外顯示內部事件（`Listening`、`ConnectDelayed`、`ConnectRetried`、`Closed`、`CloseFailed`）。
+*   Identity 若非 UTF-8 則顯示為小寫 Hex。
 
 ---
 
@@ -414,6 +449,19 @@ zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --bind --topic my_topic --file m
     ```bash
     zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --topic sensor
     ```
+
+#### 範例 6：Peer 連線監控
+
+1.  **啟動帶有監控的 Router**：
+    ```bash
+    zmqc --mode router --endpoint tcp://127.0.0.1:5570 --monitor
+    ```
+
+2.  **啟動後再關閉 Dealer**：
+    ```bash
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:5570 --identity alice
+    ```
+    Router 於連線時輸出 `[PEER] Connected: tcp://127.0.0.1:xxxxx (alice)`，Dealer 結束時輸出 `[PEER] Disconnected: alice`。
 
 ---
 

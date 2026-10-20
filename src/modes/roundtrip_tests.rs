@@ -532,4 +532,47 @@ async fn ac_e2e_17_proxy_topic_filtering_downstream() {
     proxy_handle.abort();
 }
 
+// AC-E2E-18: Server binds with monitor, Client connects and disconnects; server verifies Connected and Disconnected events
+#[tokio::test]
+async fn ac_e2e_18_monitor_connect_and_disconnect_events() {
+    use super::monitor::format_socket_event;
+    use futures_util::StreamExt;
+    use zeromq::{PubSocket, SubSocket};
 
+    let mut server = PubSocket::new();
+    let mut monitor = server.monitor();
+    let endpoint = server.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut client = SubSocket::new();
+    client.connect(&endpoint).await.unwrap();
+
+    let mut connected_found = false;
+    let timeout_duration = Duration::from_secs(2);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout_duration && !connected_found {
+        if let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(100), monitor.next()).await {
+            if let Some(msg) = format_socket_event(&ev, None, false) {
+                if msg.contains("Connected:") {
+                    connected_found = true;
+                }
+            }
+        }
+    }
+    assert!(connected_found, "Expected to find [PEER] Connected event");
+
+    // Drop client to trigger disconnection
+    drop(client);
+
+    let mut disconnected_found = false;
+    let start_disc = std::time::Instant::now();
+    while start_disc.elapsed() < timeout_duration && !disconnected_found {
+        if let Ok(Some(ev)) = tokio::time::timeout(Duration::from_millis(100), monitor.next()).await {
+            if let Some(msg) = format_socket_event(&ev, None, false) {
+                if msg.contains("Disconnected:") {
+                    disconnected_found = true;
+                }
+            }
+        }
+    }
+    assert!(disconnected_found, "Expected to find [PEER] Disconnected event");
+}
