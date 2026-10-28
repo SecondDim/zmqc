@@ -7,19 +7,19 @@ use modes::{dealer_mode, proxy_mode, pub_mode, router_mode, sub_mode};
 #[command(version, about, long_about = None)]
 pub struct ZmqArgs {
     /// Operation mode: 'Pub', 'Sub', 'Dealer', 'Router', or 'Proxy'
-    #[arg(long, value_enum, ignore_case = true)]
+    #[arg(short, long, value_enum, ignore_case = true)]
     pub mode: Mode,
 
     /// If set, bind to endpoint; otherwise, connect (supports --bind=false; Proxy XPUB defaults to bind; Router always binds).
-    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[arg(short, long, default_missing_value = "true", num_args = 0..=1)]
     pub bind: Option<bool>,
 
     /// Explicitly connect to endpoint (forces bind to false). Applies to all modes.
-    #[arg(long, default_value_t = false)]
+    #[arg(short, long, default_value_t = false)]
     pub connect: bool,
 
     /// ZeroMQ endpoint to use (e.g., tcp://127.0.0.1:5555)
-    #[arg(long)]
+    #[arg(short, long)]
     pub endpoint: String,
 
     /// Secondary ZeroMQ endpoint used for XSUB in Proxy mode (connecting to publishers)
@@ -31,11 +31,11 @@ pub struct ZmqArgs {
     pub relay_bind: bool,
 
     /// Optional topic for PUB/SUB filtering or DEALER/ROUTER frame prefix (default: "*")
-    #[arg(long, default_value = "*")]
+    #[arg(short, long, default_value = "*")]
     pub topic: String,
 
     /// Input file to publish (PUB) or output file to save messages (SUB)
-    #[arg(long)]
+    #[arg(short, long)]
     pub file: Option<String>,
 
     /// Batch size for binary file streaming throttling (default: 1000)
@@ -47,11 +47,11 @@ pub struct ZmqArgs {
     pub throttle_interval_ms: u64,
 
     /// Socket identity for DEALER / ROUTER modes
-    #[arg(long)]
+    #[arg(short, long)]
     pub identity: Option<String>,
 
     /// Enable automatic ACK replies for ROUTER mode
-    #[arg(long, default_value_t = false)]
+    #[arg(short, long, default_value_t = false)]
     pub ack: bool,
 
     /// Monitor and display peer connection and disconnection events
@@ -59,7 +59,7 @@ pub struct ZmqArgs {
     pub monitor: bool,
 
     /// Enable verbose debug output (shows all internal socket events when used with --monitor)
-    #[arg(long, default_value_t = false)]
+    #[arg(short, long, default_value_t = false)]
     pub debug: bool,
 }
 
@@ -547,5 +547,45 @@ mod tests {
         .unwrap();
         assert!(m_proxy.monitor);
         assert!(validate_args(&m_proxy).is_ok());
+    }
+
+    // AC-CLI-16: Short options support (-m, -e, -b, -c, -t, -f, -i, -a, -d)
+    #[test]
+    fn ac_cli_16_short_options_support() {
+        let a = parse(&[
+            "-m", "sub",
+            "-e", "tcp://127.0.0.1:5555",
+            "-t", "alerts",
+            "-f", "out.log",
+            "-d",
+        ])
+        .unwrap();
+        assert!(matches!(a.mode, Mode::Sub));
+        assert_eq!(a.endpoint, "tcp://127.0.0.1:5555");
+        assert_eq!(a.topic, "alerts");
+        assert_eq!(a.file.as_deref(), Some("out.log"));
+        assert!(a.debug);
+
+        // Dealer mode with -i and -c
+        let d = parse(&["-m", "dealer", "-e", "tcp://127.0.0.1:5555", "-i", "d1", "-c"]).unwrap();
+        assert!(matches!(d.mode, Mode::Dealer));
+        assert_eq!(d.identity.as_deref(), Some("d1"));
+        assert!(d.connect);
+        assert!(!d.is_bind());
+
+        // Router mode with -b and -a
+        let r = parse(&["-m", "router", "-e", "tcp://127.0.0.1:5555", "-b", "-a"]).unwrap();
+        assert!(matches!(r.mode, Mode::Router));
+        assert_eq!(r.bind, Some(true));
+        assert!(r.ack);
+
+        // -b false
+        let r_nobind = parse(&["-m", "pub", "-e", "tcp://127.0.0.1:5555", "-b=false"]).unwrap();
+        assert_eq!(r_nobind.bind, Some(false));
+
+        // Combined bool flags (-cd)
+        let comb = parse(&["-m", "pub", "-e", "tcp://127.0.0.1:5555", "-cd"]).unwrap();
+        assert!(comb.connect);
+        assert!(comb.debug);
     }
 }

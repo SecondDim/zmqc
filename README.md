@@ -74,20 +74,31 @@ Run `zmqc --help` to view full help details. Below are the primary arguments:
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `--mode <pub\|sub\|dealer\|router\|proxy>` | Required | - | Operating mode: `pub`, `sub`, `dealer`, `router`, or `proxy` (case-insensitive). |
-| `--endpoint <url>` | Required | - | ZeroMQ endpoint address (e.g. `tcp://127.0.0.1:5555`). In **proxy** mode, acts as the XPUB endpoint. |
+| `-m, --mode <pub\|sub\|dealer\|router\|proxy>` | Required | - | Operating mode: `pub`, `sub`, `dealer`, `router`, or `proxy` (case-insensitive). |
+| `-e, --endpoint <url>` | Required | - | ZeroMQ endpoint address (e.g. `tcp://127.0.0.1:5555`). In **proxy** mode, acts as the XPUB endpoint. |
 | `--relay-endpoint <url>` | Optional | - | **Proxy mode only (required)**: ZeroMQ endpoint address for the XSUB socket connecting to upstream publishers. |
-| `--bind` | Flag/Bool | `false` (XPUB/Router: `true`) | If specified (or `--bind=true`), the socket executes `bind`; supports `--bind=false`. Defaults to `bind` in Proxy (XPUB) and Router; defaults to `connect` in Pub, Sub, Dealer. |
-| `--connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes. |
+| `-b, --bind` | Flag/Bool | `false` (XPUB/Router: `true`) | If specified (or `-b=true` / `--bind=true`), the socket executes `bind`; supports `--bind=false` / `-b=false`. Defaults to `bind` in Proxy (XPUB) and Router; defaults to `connect` in Pub, Sub, Dealer. |
+| `-c, --connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes. |
 | `--relay-bind` | Flag | `false` | **Proxy mode only**: If specified, the XSUB socket executes `bind` (defaults to `connect`). |
 | `--monitor` | Flag | `false` | Monitors remote peer connect, disconnect, and handshake failure events (`[PEER] Connected: ...`, `[PEER] Disconnected: ...`). Supported across all modes. |
-| `--debug` | Flag | `false` | Enables live console output for proxy forwarding (`[RELAY]`, `[SUB]`); combined with `--monitor`, outputs internal socket lifecycle events across all modes. |
-| `--topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY mode**: ignored with a warning. |
-| `--file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY**). |
-| `--identity <string>` | Optional | - | **DEALER / ROUTER mode**: Specify custom ZeroMQ Socket Identity. |
-| `--ack` | Flag | `false` | **ROUTER mode**: Automatically reply `ACK` to the source peer upon receiving any message. |
+| `-d, --debug` | Flag | `false` | Enables live console output for proxy forwarding (`[RELAY]`, `[SUB]`); combined with `--monitor`, outputs internal socket lifecycle events across all modes. |
+| `-t, --topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY mode**: ignored with a warning. |
+| `-f, --file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY**). |
+| `-i, --identity <string>` | Optional | - | **DEALER / ROUTER mode**: Specify custom ZeroMQ Socket Identity. |
+| `-a, --ack` | Flag | `false` | **ROUTER mode**: Automatically reply `ACK` to the source peer upon receiving any message. |
 | `--batch-size <int>` | Optional | `1000` | Batch size for binary file streaming. |
 | `--throttle-interval-ms <int>` | Optional | `100` | Delay in milliseconds between batches during binary file streaming (0 disables throttling). |
+
+> [!TIP]
+> **Short Flags Quick Reference**:
+> Frequently used parameters support concise single-letter flags:
+> ```bash
+> # Long flags:
+> zmqc --mode sub --endpoint tcp://127.0.0.1:5555 --topic news --file received.txt
+> # Short flags equivalent:
+> zmqc -m sub -e tcp://127.0.0.1:5555 -t news -f received.txt
+> ```
+
 
 ---
 
@@ -312,20 +323,31 @@ cargo build --release
 
 | 參數 | 類型 | 預設值 | 說明 |
 | :--- | :--- | :--- | :--- |
-| `--mode <pub\|sub\|dealer\|router\|proxy>` | 必填 | - | 運作模式：`pub`、`sub`、`dealer`、`router` 或 `proxy`，不區分大小寫。 |
-| `--endpoint <url>` | 必填 | - | ZeroMQ 端點位址。在 **proxy** 模式中為 XPUB 端點位址。 |
+| `-m, --mode <pub\|sub\|dealer\|router\|proxy>` | 必填 | - | 運作模式：`pub`、`sub`、`dealer`、`router` 或 `proxy`，不區分大小寫。 |
+| `-e, --endpoint <url>` | 必填 | - | ZeroMQ 端點位址。在 **proxy** 模式中為 XPUB 端點位址。 |
 | `--relay-endpoint <url>` | 選填 | - | **Proxy 模式專用（必填）**：XSUB 端點位址，連接上游 Publisher。 |
-| `--bind` | 開關/布林 | `false` (XPUB/Router: `true`) | 若加上此參數，Socket 執行 `bind`；支援 `--bind=false`。Proxy (XPUB) 與 Router 預設為 `bind`；其餘模式預設為 `connect`。 |
-| `--connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式。 |
+| `-b, --bind` | 開關/布林 | `false` (XPUB/Router: `true`) | 若加上此參數（或 `-b=true` / `--bind=true`），Socket 執行 `bind`；支援 `--bind=false` / `-b=false`。Proxy (XPUB) 與 Router 預設為 `bind`；其餘模式預設為 `connect`。 |
+| `-c, --connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式。 |
 | `--relay-bind` | 開關 | `false` | **Proxy 模式專用**：若加上此參數，XSUB 端點執行 `bind`（預設為 `connect`）。 |
 | `--monitor` | 開關 | `false` | 監控遠端 Peer 的連線、斷線與握手失敗事件（`[PEER] Connected: ...`、`[PEER] Disconnected: ...`），適用於所有模式。 |
-| `--debug` | 開關 | `false` | Proxy 模式即時輸出轉發資料 (`[RELAY]`) 與訂閱事件 (`[SUB]`)；搭配 `--monitor` 時，所有模式額外輸出 Socket 內部事件。 |
-| `--topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY 模式**：忽略並輸出警告。 |
-| `--file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY 模式忽略並輸出警告**）。 |
-| `--identity <string>` | 選填 | - | **DEALER / ROUTER 模式**：指定自己的 ZeroMQ Socket Identity。 |
-| `--ack` | 開關 | `false` | **ROUTER 模式**：收到任何訊息時自動回覆 `ACK` 給來源 Peer。 |
+| `-d, --debug` | 開關 | `false` | Proxy 模式即時輸出轉發資料 (`[RELAY]`) 與訂閱事件 (`[SUB]`)；搭配 `--monitor` 時，所有模式額外輸出 Socket 內部事件。 |
+| `-t, --topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY 模式**：忽略並輸出警告。 |
+| `-f, --file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY 模式忽略並輸出警告**）。 |
+| `-i, --identity <string>` | 選填 | - | **DEALER / ROUTER 模式**：指定自己的 ZeroMQ Socket Identity。 |
+| `-a, --ack` | 開關 | `false` | **ROUTER 模式**：收到任何訊息時自動回覆 `ACK` 給來源 Peer。 |
 | `--batch-size <int>` | 選填 | `1000` | 二進位檔案串流發送的批次大小。 |
 | `--throttle-interval-ms <int>` | 選填 | `100` | 二進位檔案串流每發送一個批次後非同步暫停之毫秒數（設為 0 則不暫停）。 |
+
+> [!TIP]
+> **簡寫參數快速對照**：
+> 常用核心參數均支援簡寫：
+> ```bash
+> # 完整長參數：
+> zmqc --mode sub --endpoint tcp://127.0.0.1:5555 --topic news --file received.txt
+> # 等效簡寫指令：
+> zmqc -m sub -e tcp://127.0.0.1:5555 -t news -f received.txt
+> ```
+
 
 ---
 
