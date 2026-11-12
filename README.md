@@ -6,13 +6,13 @@
 
 ## English
 
-`zmqc` is a lightweight ZeroMQ (ZMQ) command-line testing utility written in Rust. Powered by a **pure Rust** architecture using `zeromq` and `tokio` async runtime, it supports **Publisher (PUB)**, **Subscriber (SUB)**, **Dealer**, **Router**, and **Proxy (XPUB/XSUB)** modes. It is ideal for debugging, testing ZMQ network topologies, and rapidly verifying message exchanges.
+`zmqc` is a lightweight ZeroMQ (ZMQ) command-line testing utility written in Rust. Powered by a **pure Rust** architecture using `zeromq` and `tokio` async runtime, it supports **Publisher (PUB)**, **Subscriber (SUB)**, **Dealer**, **Router**, **Proxy (XPUB/XSUB)**, and **Broker (ROUTER/PUB)** modes. It is ideal for debugging, testing ZMQ network topologies, and rapidly verifying message exchanges.
 
 ### 💡 Features
 
 *   **Pure Rust Implementation**: Built on `zeromq` and `tokio`—no need to install or compile C/C++ `libzmq` development libraries, with zero dependency on `libzmq.dll`.
 *   **Asynchronous High-Performance I/O**: Fully asynchronous, event-driven architecture with complete decoupling of network communication and disk I/O.
-*   **Multiple Socket Modes**: Supports Publisher (PUB), Subscriber (SUB), Dealer, Router, and Proxy (XPUB/XSUB) modes.
+*   **Multiple Socket Modes**: Supports Publisher (PUB), Subscriber (SUB), Dealer, Router, Proxy (XPUB/XSUB), and Broker (ROUTER/PUB) modes.
 *   **Flexible Connection Types**: Supports binding to an endpoint (`--bind`, supporting `--bind=false`), connecting via `--connect`, and specialized relay binding (`--relay-bind`).
 *   **Topic Filtering**: Supports filtering messages by topic (`--topic`) when publishing or subscribing.
 *   **Throughput Throttling**: Binary file streaming supports fine-grained rate limiting via `--batch-size` and `--throttle-interval-ms`.
@@ -74,18 +74,19 @@ Run `zmqc --help` to view full help details. Below are the primary arguments:
 
 | Option | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `-m, --mode <pub\|sub\|dealer\|router\|proxy>` | Required | - | Operating mode: `pub`, `sub`, `dealer`, `router`, or `proxy` (case-insensitive). |
-| `-e, --endpoint <url>` | Required | - | ZeroMQ endpoint address (e.g. `tcp://127.0.0.1:5555`). In **proxy** mode, acts as the XPUB endpoint. |
-| `--relay-endpoint <url>` | Optional | - | **Proxy mode only (required)**: ZeroMQ endpoint address for the XSUB socket connecting to upstream publishers. |
-| `-b, --bind` | Flag/Bool | `false` (XPUB/Router: `true`) | If specified (or `-b=true` / `--bind=true`), the socket executes `bind`; supports `--bind=false` / `-b=false`. Defaults to `bind` in Proxy (XPUB) and Router; defaults to `connect` in Pub, Sub, Dealer. |
-| `-c, --connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes. |
-| `--relay-bind` | Flag | `false` | **Proxy mode only**: If specified, the XSUB socket executes `bind` (defaults to `connect`). |
+| `-m, --mode <pub\|sub\|dealer\|router\|proxy\|broker>` | Required | - | Operating mode: `pub`, `sub`, `dealer`, `router`, `proxy`, or `broker` (case-insensitive). |
+| `-e, --endpoint <url>` | Required | - | ZeroMQ endpoint address (e.g. `tcp://127.0.0.1:5555`). In **proxy** mode, acts as the XPUB endpoint; in **broker** mode, acts as the ROUTER endpoint. |
+| `--relay-endpoint <url>` | Optional | - | **Proxy & Broker modes only (required)**: XSUB endpoint in **proxy** mode (connects to publishers); PUB endpoint in **broker** mode (always binds for subscribers). |
+| `-b, --bind` | Flag/Bool | `false` (XPUB/Router/Broker: `true`) | If specified (or `-b=true` / `--bind=true`), the socket executes `bind`; supports `--bind=false` / `-b=false`. Defaults to `bind` in Proxy (XPUB), Router, and Broker; defaults to `connect` in Pub, Sub, Dealer. |
+| `-c, --connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes (Router and Broker always bind). |
+| `--relay-bind` | Flag | `false` | **Proxy mode only**: If specified, the XSUB socket executes `bind` (defaults to `connect`; rejected in `broker` mode). |
 | `--monitor` | Flag | `false` | Monitors remote peer connect, disconnect, and handshake failure events (`[PEER] Connected: ...`, `[PEER] Disconnected: ...`). Supported across all modes. |
-| `-d, --debug` | Flag | `false` | Enables live console output for proxy forwarding (`[RELAY]`, `[SUB]`); combined with `--monitor`, outputs internal socket lifecycle events across all modes. |
-| `-t, --topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY mode**: ignored with a warning. |
-| `-f, --file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY**). |
+| `-d, --debug` | Flag | `false` | Enables live console output for proxy (`[RELAY]`, `[SUB]`) and broker (`[DATA]`, `[CMD]`, `[REG]`); combined with `--monitor`, outputs internal socket lifecycle events across all modes. |
+| `-t, --topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY/BROKER mode**: ignored with a warning. |
+| `-f, --file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY/BROKER**). |
 | `-i, --identity <string>` | Optional | - | **DEALER / ROUTER mode**: Specify custom ZeroMQ Socket Identity. |
 | `-a, --ack` | Flag | `false` | **ROUTER mode**: Automatically reply `ACK` to the source peer upon receiving any message. |
+| `--register` | Flag | `false` | **DEALER mode**: Automatically register as a Broker worker (sends `_R` on start and every 60s, `_U` on Ctrl+C). |
 | `--batch-size <int>` | Optional | `1000` | Batch size for binary file streaming. |
 | `--throttle-interval-ms <int>` | Optional | `100` | Delay in milliseconds between batches during binary file streaming (0 disables throttling). |
 
@@ -151,12 +152,30 @@ Both `dealer` and `router` are **bidirectional modes** (capable of simultaneous 
 *   **Graceful Flag Handling**:
     *   `--topic` and `--file` are ignored with a warning and do not halt execution.
 
-#### 5. Peer Connection Monitoring (`--monitor`)
+#### 5. BROKER Mode: ROUTER / PUB Direct Proxy & Command Broadcast
+`broker` mode provides a central message hub that receives messages from Dealers via a `ROUTER` socket (`--endpoint`), broadcasts control commands back to registered Dealer workers, and publishes business messages to Subscribers via a `PUB` socket (`--relay-endpoint`):
+*   **Always Binds Both Endpoints**: Both the `ROUTER` socket (`--endpoint`) and the `PUB` socket (`--relay-endpoint`) always bind (`--relay-bind` is rejected).
+*   **3-Frame Wire Protocol**: Expects 3 frames `[identity, topic, payload]` on the `ROUTER` socket. Any message with frame count ≠ 3 or an empty identity is dropped and counted in `dropped`.
+*   **Worker Registration & Command Broadcast (`_` topic prefix)**:
+    *   `_R` (exact): Registers the sender's `identity` in `WorkerRegistry` (idempotent).
+    *   `_U` (exact): Removes the sender's `identity` from `WorkerRegistry`.
+    *   Any other `_`-prefixed topic (e.g. `_CMD`): Broadcasts `[worker_id, topic, payload]` via the `ROUTER` socket to every currently registered worker.
+    *   Workers can pass `--register` in `dealer` mode (`zmqc -m dealer -e <router_url> --register`) to automatically send `_R` on startup, re-send `_R` every 60 seconds (surviving broker restarts), and send `_U` on Ctrl+C.
+*   **Business Message Publishing (non-`_` topic)**:
+    *   Forwards `[topic, payload]` directly to the `PUB` socket for downstream Subscribers.
+*   **Quiet Mode, `--debug`, and Exit Summary**:
+    *   Runs quietly by default; on Ctrl+C prints: `Broker summary: published {p} message(s), broadcast {c} command(s), {r} registered, {u} unregistered, {d} dropped.`
+    *   With `--debug`, prints `[DATA]`, `[CMD]`, and `[REG]` events in real time.
+
+> [!NOTE]
+> `zeromq 0.6.0` `SocketOptions` only exposes `peer_identity`; low-level libzmq/NetMQ socket options (`ROUTER_HANDOVER`, `SNDHWM`/`RCVHWM`, `SNDBUF`/`RCVBUF`, `TCP_KEEPALIVE`) are not configurable.
+
+#### 6. Peer Connection Monitoring (`--monitor`)
 Available in all modes (both `bind` and `connect`). Prints peer lifecycle events to the console:
 *   `[PEER] Connected: {endpoint} ({identity})` — a peer connected to a bound socket, or the local socket connected to a remote endpoint.
 *   `[PEER] Disconnected: {identity}` — a peer disconnected.
 *   `[PEER] Accept failed: {error}` — an incoming connection failed during handshake.
-*   In **proxy** mode, events are tagged by role: `[PEER] [XPUB] ...` and `[PEER] [XSUB] ...`.
+*   In **proxy** mode, events are tagged `[PEER] [XPUB] ...` and `[PEER] [XSUB] ...`; in **broker** mode, events are tagged `[PEER] [ROUTER] ...` and `[PEER] [PUB] ...`.
 *   Add `--debug` to also show internal events (`Listening`, `ConnectDelayed`, `ConnectRetried`, `Closed`, `CloseFailed`).
 *   Identities that are not valid UTF-8 are shown as lowercase hex.
 
@@ -236,6 +255,29 @@ zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --bind --topic my_topic --file m
     ```
     The Router prints `[PEER] Connected: tcp://127.0.0.1:xxxxx (alice)` on connect and `[PEER] Disconnected: alice` when the Dealer exits.
 
+#### Example 7: Broker Mode (ROUTER Ingress + PUB Egress + Worker Command Broadcast)
+
+1.  **Start Broker** (ROUTER bound on 55550, PUB bound on 55555, with debug output):
+    ```bash
+    zmqc --mode broker --endpoint tcp://127.0.0.1:55550 --relay-endpoint tcp://127.0.0.1:55555 --debug
+    ```
+
+2.  **Start Subscriber** (connects to Broker PUB on 55555):
+    ```bash
+    zmqc --mode sub --endpoint tcp://127.0.0.1:55555
+    ```
+
+3.  **Start Worker Dealer** (auto-registers via `--register` every 60s):
+    ```bash
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:55550 --identity worker-1 --register
+    ```
+
+4.  **Start Producer Dealer** (sends business messages published to Subscribers) and **Command Dealer** (broadcasts `_CMD` to registered workers):
+    ```bash
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:55550 --topic quote
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:55550 --topic _CMD
+    ```
+
 ---
 
 ### 🛠️ Development & Maintenance Commands
@@ -255,13 +297,13 @@ Recommended tools for maintaining project dependencies:
 
 ## 繁體中文
 
-`zmqc` 是一個使用 Rust 語言編寫的輕量型 ZeroMQ (ZMQ) 命令列測試工具，採用 **純 Rust** 的 `zeromq` 與 `tokio` 非同步架構，支援 **發布者 (Publisher)**、**訂閱者 (Subscriber)**、**Dealer**、**Router** 與 **Proxy (XPUB/XSUB)** 模式。它非常適合用於除錯、測試 ZMQ 網路拓撲，以及快速驗證訊息傳遞。
+`zmqc` 是一個使用 Rust 語言編寫的輕量型 ZeroMQ (ZMQ) 命令列測試工具，採用 **純 Rust** 的 `zeromq` 與 `tokio` 非同步架構，支援 **發布者 (Publisher)**、**訂閱者 (Subscriber)**、**Dealer**、**Router**、**Proxy (XPUB/XSUB)** 與 **Broker (ROUTER/PUB)** 模式。它非常適合用於除錯、測試 ZMQ 網路拓撲，以及快速驗證訊息傳遞。
 
 ### 💡 功能特色
 
 *   **純 Rust 實現**：基於 `zeromq` 與 `tokio`，無需安裝或編譯 C/C++ `libzmq` 開發庫，亦無需依賴 `libzmq.dll`。
 *   **非同步高效能 I/O**：全非同步事件驅動架構，通訊與磁碟 I/O 全面解耦。
-*   **多種模式支援**：支援發布者（PUB）、訂閱者（SUB）、Dealer、Router 與代理中繼（Proxy）運作模式。
+*   **多種模式支援**：支援發布者（PUB）、訂閱者（SUB）、Dealer、Router、代理中繼（Proxy）與訊息中樞（Broker）運作模式。
 *   **靈活的連線方式**：支援綁定端點（`--bind`，支援 `--bind=false`）、顯式連線端點（`--connect`）與中繼端點綁定（`--relay-bind`）。
 *   **訊息主題過濾**：發布或接收時支援透過主題（`--topic`）進行過濾。
 *   **發送流量節流**：二進位檔案串流支援 `--batch-size` 與 `--throttle-interval-ms` 彈性調控。
@@ -323,18 +365,19 @@ cargo build --release
 
 | 參數 | 類型 | 預設值 | 說明 |
 | :--- | :--- | :--- | :--- |
-| `-m, --mode <pub\|sub\|dealer\|router\|proxy>` | 必填 | - | 運作模式：`pub`、`sub`、`dealer`、`router` 或 `proxy`，不區分大小寫。 |
-| `-e, --endpoint <url>` | 必填 | - | ZeroMQ 端點位址。在 **proxy** 模式中為 XPUB 端點位址。 |
-| `--relay-endpoint <url>` | 選填 | - | **Proxy 模式專用（必填）**：XSUB 端點位址，連接上游 Publisher。 |
-| `-b, --bind` | 開關/布林 | `false` (XPUB/Router: `true`) | 若加上此參數（或 `-b=true` / `--bind=true`），Socket 執行 `bind`；支援 `--bind=false` / `-b=false`。Proxy (XPUB) 與 Router 預設為 `bind`；其餘模式預設為 `connect`。 |
-| `-c, --connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式。 |
-| `--relay-bind` | 開關 | `false` | **Proxy 模式專用**：若加上此參數，XSUB 端點執行 `bind`（預設為 `connect`）。 |
+| `-m, --mode <pub\|sub\|dealer\|router\|proxy\|broker>` | 必填 | - | 運作模式：`pub`、`sub`、`dealer`、`router`、`proxy` 或 `broker`，不區分大小寫。 |
+| `-e, --endpoint <url>` | 必填 | - | ZeroMQ 端點位址。在 **proxy** 模式中為 XPUB 端點位址；在 **broker** 模式中為 ROUTER 端點位址。 |
+| `--relay-endpoint <url>` | 選填 | - | **Proxy 與 Broker 模式專用（必填）**：Proxy 模式為 XSUB 端點（連接上游 Publisher）；Broker 模式為 PUB 端點（永遠 bind 供下游 Subscriber 連線）。 |
+| `-b, --bind` | 開關/布林 | `false` (XPUB/Router/Broker: `true`) | 若加上此參數（或 `-b=true` / `--bind=true`），Socket 執行 `bind`；支援 `--bind=false` / `-b=false`。Proxy (XPUB)、Router 與 Broker 預設為 `bind`；其餘模式預設為 `connect`。 |
+| `-c, --connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式（Router 與 Broker 永遠 bind）。 |
+| `--relay-bind` | 開關 | `false` | **Proxy 模式專用**：若加上此參數，XSUB 端點執行 `bind`（預設為 `connect`；Broker 模式禁止使用）。 |
 | `--monitor` | 開關 | `false` | 監控遠端 Peer 的連線、斷線與握手失敗事件（`[PEER] Connected: ...`、`[PEER] Disconnected: ...`），適用於所有模式。 |
-| `-d, --debug` | 開關 | `false` | Proxy 模式即時輸出轉發資料 (`[RELAY]`) 與訂閱事件 (`[SUB]`)；搭配 `--monitor` 時，所有模式額外輸出 Socket 內部事件。 |
-| `-t, --topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY 模式**：忽略並輸出警告。 |
-| `-f, --file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY 模式忽略並輸出警告**）。 |
+| `-d, --debug` | 開關 | `false` | Proxy 模式即時輸出 `[RELAY]`/`[SUB]`，Broker 模式即時輸出 `[DATA]`/`[CMD]`/`[REG]`；搭配 `--monitor` 時，所有模式額外輸出 Socket 內部事件。 |
+| `-t, --topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY/BROKER 模式**：忽略並輸出警告。 |
+| `-f, --file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY/BROKER 模式忽略並輸出警告**）。 |
 | `-i, --identity <string>` | 選填 | - | **DEALER / ROUTER 模式**：指定自己的 ZeroMQ Socket Identity。 |
 | `-a, --ack` | 開關 | `false` | **ROUTER 模式**：收到任何訊息時自動回覆 `ACK` 給來源 Peer。 |
+| `--register` | 開關 | `false` | **DEALER 模式**：自動向 Broker 註冊為 Worker（啟動時與每 60 秒發送 `_R`，Ctrl+C 退出時發送 `_U`）。 |
 | `--batch-size <int>` | 選填 | `1000` | 二進位檔案串流發送的批次大小。 |
 | `--throttle-interval-ms <int>` | 選填 | `100` | 二進位檔案串流每發送一個批次後非同步暫停之毫秒數（設為 0 則不暫停）。 |
 
@@ -400,12 +443,30 @@ cargo build --release
 *   **參數容錯**：
     *   若傳入 `--topic` 或 `--file`，會印出 Warning 提示並自動忽略，維持正常運作。
 
-#### 5. Peer 連線監控（`--monitor`）
+#### 5. BROKER 模式：ROUTER / PUB 訊息中樞與指令廣播
+`broker` 模式建立一個結合 `ROUTER`（入口，`--endpoint`）與 `PUB`（出口，`--relay-endpoint`）的訊息中樞：
+*   **雙端點永遠 Bind**：`ROUTER`（`--endpoint`）與 `PUB`（`--relay-endpoint`）皆永遠執行 `bind`（禁止使用 `--relay-bind`）。
+*   **3-Frame 通訊協定**：`ROUTER` 接收固定 3 幀 `[identity, topic, payload]`；幀數不為 3 或 `identity` 為空之訊息將直接丟棄並計入 `dropped`。
+*   **Worker 註冊與指令廣播（`_` 主題前綴）**：
+    *   `_R`（完全相符）：將發送端 `identity` 註冊至 `WorkerRegistry`（具冪等性）。
+    *   `_U`（完全相符）：將發送端 `identity` 從 `WorkerRegistry` 移除。
+    *   其他以 `_` 開頭之主題（例如 `_CMD`）：透過 `ROUTER` 對所有已註冊之 Worker 廣播 `[worker_id, topic, payload]`。
+    *   Worker 端可在 `dealer` 模式加上 `--register`（`zmqc -m dealer -e <router_url> --register`），啟動後立即發送 `_R`、連線期間每 60 秒重新發送 `_R`（防止 Broker 重啟後遺失註冊表），並於 Ctrl+C 結束時自動發送 `_U`。
+*   **一般業務訊息發布（非 `_` 開頭主題）**：
+    *   直接透過 `PUB` Socket 以 2 幀 `[topic, payload]` 發布給所有訂閱者（Subscriber）。
+*   **安靜模式、`--debug` 與結束統計**：
+    *   預設安靜執行，按下 `Ctrl+C` 時印出統計：`Broker summary: published {p} message(s), broadcast {c} command(s), {r} registered, {u} unregistered, {d} dropped.`
+    *   加上 `--debug` 可即時印出 `[DATA]`、`[CMD]` 與 `[REG]` 事件。
+
+> [!NOTE]
+> `zeromq 0.6.0` 的 `SocketOptions` 僅開放 `peer_identity`，因此低階 `libzmq`/`NetMQ` 參數（如 `ROUTER_HANDOVER`、`SNDHWM`/`RCVHWM`、`SNDBUF`/`RCVBUF`、`TCP_KEEPALIVE`）無法透過此版本設定。
+
+#### 6. Peer 連線監控（`--monitor`）
 所有模式皆可使用（`bind` 與 `connect` 皆支援），會在終端機輸出 Peer 生命週期事件：
 *   `[PEER] Connected: {endpoint} ({identity})` — 有 Peer 連入已綁定的 Socket，或本機 Socket 已連上遠端端點。
 *   `[PEER] Disconnected: {identity}` — Peer 斷線。
 *   `[PEER] Accept failed: {error}` — 連入的連線於握手時失敗。
-*   **Proxy** 模式會以角色標籤區分：`[PEER] [XPUB] ...` 與 `[PEER] [XSUB] ...`。
+*   **Proxy** 模式會以角色標籤區分：`[PEER] [XPUB] ...` 與 `[PEER] [XSUB] ...`；**Broker** 模式則以 `[PEER] [ROUTER] ...` 與 `[PEER] [PUB] ...` 區分。
 *   加上 `--debug` 可額外顯示內部事件（`Listening`、`ConnectDelayed`、`ConnectRetried`、`Closed`、`CloseFailed`）。
 *   Identity 若非 UTF-8 則顯示為小寫 Hex。
 
@@ -484,6 +545,29 @@ zmqc --mode pub --endpoint tcp://127.0.0.1:5555 --bind --topic my_topic --file m
     zmqc --mode dealer --endpoint tcp://127.0.0.1:5570 --identity alice
     ```
     Router 於連線時輸出 `[PEER] Connected: tcp://127.0.0.1:xxxxx (alice)`，Dealer 結束時輸出 `[PEER] Disconnected: alice`。
+
+#### 範例 7：Broker 模式（ROUTER 入口 + PUB 出口 + Worker 指令廣播）
+
+1.  **啟動 Broker**（ROUTER 綁定 55550，PUB 綁定 55555，並開啟 `--debug`）：
+    ```bash
+    zmqc --mode broker --endpoint tcp://127.0.0.1:55550 --relay-endpoint tcp://127.0.0.1:55555 --debug
+    ```
+
+2.  **啟動訂閱者**（連線至 Broker PUB 55555）：
+    ```bash
+    zmqc --mode sub --endpoint tcp://127.0.0.1:55555
+    ```
+
+3.  **啟動 Worker Dealer**（加上 `--register`，啟動時與每 60 秒自動發送 `_R` 註冊）：
+    ```bash
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:55550 --identity worker-1 --register
+    ```
+
+4.  **啟動一般資料 Dealer**（發送業務訊息給 SUB）與 **指令 Dealer**（發送 `_CMD` 廣播給已註冊 Worker）：
+    ```bash
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:55550 --topic quote
+    zmqc --mode dealer --endpoint tcp://127.0.0.1:55550 --topic _CMD
+    ```
 
 ---
 

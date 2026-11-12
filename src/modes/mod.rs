@@ -1,3 +1,4 @@
+pub mod broker_mode;
 pub mod dealer_mode;
 pub mod monitor;
 pub mod proxy_mode;

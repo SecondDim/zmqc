@@ -1,16 +1,16 @@
 use clap::{Parser, ValueEnum};
 
 mod modes;
-use modes::{dealer_mode, proxy_mode, pub_mode, router_mode, sub_mode};
+use modes::{broker_mode, dealer_mode, proxy_mode, pub_mode, router_mode, sub_mode};
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct ZmqArgs {
-    /// Operation mode: 'Pub', 'Sub', 'Dealer', 'Router', or 'Proxy'
+    /// Operation mode: 'Pub', 'Sub', 'Dealer', 'Router', 'Proxy', or 'Broker'
     #[arg(short, long, value_enum, ignore_case = true)]
     pub mode: Mode,
 
-    /// If set, bind to endpoint; otherwise, connect (supports --bind=false; Proxy XPUB defaults to bind; Router always binds).
+    /// If set, bind to endpoint; otherwise, connect (supports --bind=false; Proxy XPUB defaults to bind; Router and Broker always bind).
     #[arg(short, long, default_missing_value = "true", num_args = 0..=1)]
     pub bind: Option<bool>,
 
@@ -22,11 +22,11 @@ pub struct ZmqArgs {
     #[arg(short, long)]
     pub endpoint: String,
 
-    /// Secondary ZeroMQ endpoint used for XSUB in Proxy mode (connecting to publishers)
+    /// Secondary ZeroMQ endpoint used for XSUB in Proxy mode (connecting to publishers) or PUB in Broker mode (binding for subscribers)
     #[arg(long)]
     pub relay_endpoint: Option<String>,
 
-    /// If set, bind XSUB to relay-endpoint (default in Proxy mode: connect)
+    /// If set, bind XSUB to relay-endpoint in Proxy mode (default: connect)
     #[arg(long, default_value_t = false)]
     pub relay_bind: bool,
 
@@ -54,6 +54,10 @@ pub struct ZmqArgs {
     #[arg(short, long, default_value_t = false)]
     pub ack: bool,
 
+    /// Automatically register as a worker in DEALER mode (sends _R every 60s and _U on exit)
+    #[arg(long, default_value_t = false)]
+    pub register: bool,
+
     /// Monitor and display peer connection and disconnection events
     #[arg(long, default_value_t = false)]
     pub monitor: bool,
@@ -79,12 +83,12 @@ pub fn resolve_bind_flag(mode: Mode, bind_arg: Option<bool>, connect_arg: bool) 
         return b;
     }
     match mode {
-        Mode::Router | Mode::Proxy => true,
+        Mode::Router | Mode::Proxy | Mode::Broker => true,
         _ => false,
     }
 }
 
-/// Mode enum for publish/subscribe/dealer/router/proxy (used with clap's ValueEnum)
+/// Mode enum for publish/subscribe/dealer/router/proxy/broker (used with clap's ValueEnum)
 #[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
 pub enum Mode {
     Pub,
@@ -92,6 +96,7 @@ pub enum Mode {
     Dealer,
     Router,
     Proxy,
+    Broker,
 }
 
 /// Validates argument combinations across modes.
@@ -102,6 +107,9 @@ pub fn validate_args(args: &ZmqArgs) -> Result<(), &'static str> {
     if args.ack && args.mode != Mode::Router {
         return Err("--ack is only valid in router mode");
     }
+    if args.register && args.mode != Mode::Dealer {
+        return Err("--register is only valid in dealer mode");
+    }
     if args.identity.is_some() && args.mode != Mode::Dealer && args.mode != Mode::Router {
         return Err("--identity is only valid in dealer or router mode");
     }
@@ -111,8 +119,11 @@ pub fn validate_args(args: &ZmqArgs) -> Result<(), &'static str> {
     if args.mode == Mode::Proxy && args.relay_endpoint.is_none() {
         return Err("--relay-endpoint is required in proxy mode");
     }
-    if args.mode != Mode::Proxy && args.relay_endpoint.is_some() {
-        return Err("--relay-endpoint is only valid in proxy mode");
+    if args.mode == Mode::Broker && args.relay_endpoint.is_none() {
+        return Err("--relay-endpoint is required in broker mode");
+    }
+    if args.mode != Mode::Proxy && args.mode != Mode::Broker && args.relay_endpoint.is_some() {
+        return Err("--relay-endpoint is only valid in proxy or broker mode");
     }
     if args.mode != Mode::Proxy && args.relay_bind {
         return Err("--relay-bind is only valid in proxy mode");
@@ -130,6 +141,7 @@ pub fn format_error(e: &(dyn std::error::Error + 'static), mode: Mode, endpoint:
             Mode::Dealer => ("DEALER", "ROUTER, DEALER, or REP"),
             Mode::Router => ("ROUTER", "DEALER, ROUTER, or REQ"),
             Mode::Proxy => ("XPUB/XSUB", "SUB/XPUB (for XPUB) or PUB/XSUB (for XSUB)"),
+            Mode::Broker => ("ROUTER/PUB", "DEALER, ROUTER, or REQ (for ROUTER) or SUB/XSUB (for PUB)"),
         };
         format!(
             "Error: Provided sockets combination is not compatible\n\n\
@@ -162,6 +174,7 @@ async fn main() {
         Mode::Dealer => dealer_mode::run_dealer(args.clone()).await,
         Mode::Router => router_mode::run_router(args.clone()).await,
         Mode::Proxy => proxy_mode::run_proxy(args.clone()).await,
+        Mode::Broker => broker_mode::run_broker(args.clone()).await,
     };
 
     if let Err(e) = res {
@@ -197,6 +210,7 @@ mod tests {
         assert_eq!(a.throttle_interval_ms, 100);
         assert_eq!(a.identity, None);
         assert!(!a.ack);
+        assert!(!a.register);
         assert!(!a.monitor);
         assert!(!a.debug);
     }
@@ -239,6 +253,18 @@ mod tests {
             ])
             .unwrap();
             assert!(matches!(a.mode, Mode::Proxy), "{m}");
+        }
+        for m in ["broker", "BROKER", "Broker"] {
+            let a = parse(&[
+                "--mode",
+                m,
+                "--endpoint",
+                "e",
+                "--relay-endpoint",
+                "pe",
+            ])
+            .unwrap();
+            assert!(matches!(a.mode, Mode::Broker), "{m}");
         }
         assert!(parse(&["--mode", "req", "--endpoint", "e"]).is_err());
     }
@@ -378,7 +404,7 @@ mod tests {
             Err("--relay-endpoint is required in proxy mode")
         );
 
-        // --relay-endpoint in non-proxy mode
+        // --relay-endpoint in non-proxy/non-broker mode
         let bad_sub = parse(&[
             "--mode",
             "sub",
@@ -390,7 +416,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             validate_args(&bad_sub),
-            Err("--relay-endpoint is only valid in proxy mode")
+            Err("--relay-endpoint is only valid in proxy or broker mode")
         );
     }
 
@@ -587,5 +613,135 @@ mod tests {
         let comb = parse(&["-m", "pub", "-e", "tcp://127.0.0.1:5555", "-cd"]).unwrap();
         assert!(comb.connect);
         assert!(comb.debug);
+    }
+
+    // AC-CLI-17: broker mode parsing, defaults, required --relay-endpoint, and rejected flags
+    #[test]
+    fn ac_cli_17_broker_mode_args_and_validation() {
+        let ok_broker = parse(&[
+            "--mode",
+            "broker",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:55555",
+        ])
+        .unwrap();
+        assert!(matches!(ok_broker.mode, Mode::Broker));
+        assert!(validate_args(&ok_broker).is_ok());
+        assert!(ok_broker.is_bind());
+
+        // Missing --relay-endpoint in broker mode
+        let bad_no_relay = parse(&["--mode", "broker", "--endpoint", "tcp://127.0.0.1:55550"]).unwrap();
+        assert_eq!(
+            validate_args(&bad_no_relay),
+            Err("--relay-endpoint is required in broker mode")
+        );
+
+        // --relay-bind is rejected in broker mode
+        let bad_relay_bind = parse(&[
+            "--mode",
+            "broker",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:55555",
+            "--relay-bind",
+        ])
+        .unwrap();
+        assert_eq!(
+            validate_args(&bad_relay_bind),
+            Err("--relay-bind is only valid in proxy mode")
+        );
+
+        // --ack and --identity are rejected in broker mode
+        let bad_ack = parse(&[
+            "--mode",
+            "broker",
+            "--endpoint",
+            "e",
+            "--relay-endpoint",
+            "pe",
+            "--ack",
+        ])
+        .unwrap();
+        assert_eq!(
+            validate_args(&bad_ack),
+            Err("--ack is only valid in router mode")
+        );
+
+        let bad_id = parse(&[
+            "--mode",
+            "broker",
+            "--endpoint",
+            "e",
+            "--relay-endpoint",
+            "pe",
+            "--identity",
+            "b1",
+        ])
+        .unwrap();
+        assert_eq!(
+            validate_args(&bad_id),
+            Err("--identity is only valid in dealer or router mode")
+        );
+
+        // --topic and --file are allowed in broker mode (produce runtime warnings)
+        let ok_warn = parse(&[
+            "--mode",
+            "broker",
+            "--endpoint",
+            "e",
+            "--relay-endpoint",
+            "pe",
+            "--topic",
+            "ignored",
+            "--file",
+            "ignored.txt",
+        ])
+        .unwrap();
+        assert!(validate_args(&ok_warn).is_ok());
+    }
+
+    // AC-CLI-18: --register flag defaults to false and is only valid in dealer mode
+    #[test]
+    fn ac_cli_18_register_flag_validation() {
+        let ok_dealer = parse(&[
+            "--mode",
+            "dealer",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--register",
+        ])
+        .unwrap();
+        assert!(ok_dealer.register);
+        assert!(validate_args(&ok_dealer).is_ok());
+
+        for mode in ["pub", "sub", "router"] {
+            let bad = parse(&["--mode", mode, "--endpoint", "e", "--register"]).unwrap();
+            assert_eq!(
+                validate_args(&bad),
+                Err("--register is only valid in dealer mode"),
+                "{mode}"
+            );
+        }
+
+        for mode in ["proxy", "broker"] {
+            let bad = parse(&[
+                "--mode",
+                mode,
+                "--endpoint",
+                "e",
+                "--relay-endpoint",
+                "pe",
+                "--register",
+            ])
+            .unwrap();
+            assert_eq!(
+                validate_args(&bad),
+                Err("--register is only valid in dealer mode"),
+                "{mode}"
+            );
+        }
     }
 }

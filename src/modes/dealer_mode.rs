@@ -1,9 +1,16 @@
 use bytes::Bytes;
 use std::error::Error;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use zeromq::{DealerSocket, Socket, SocketOptions, SocketRecv, SocketSend, ZmqMessage};
 
 use super::sub_mode::bytes_to_display;
+
+/// Interval between automatic `_R` worker re-registrations when `--register` is enabled.
+pub(crate) const REGISTER_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Timeout for sending `_R` / `_U` control frames so the event loop never stalls if no broker is connected.
+const CONTROL_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Resolves the topic frame for DEALER mode.
 /// If `topic` is `"*"` or empty `""`, an empty frame is returned.
@@ -21,6 +28,16 @@ pub(crate) fn build_dealer_message(topic: &Bytes, payload: Bytes) -> ZmqMessage 
     let mut msg = ZmqMessage::from(topic.clone());
     msg.push_back(payload);
     msg
+}
+
+/// Builds a 2-frame Worker registration message `["_R", ""]` for Broker mode.
+pub(crate) fn build_register_message() -> ZmqMessage {
+    build_dealer_message(&Bytes::from_static(b"_R"), Bytes::new())
+}
+
+/// Builds a 2-frame Worker unregistration message `["_U", ""]` for Broker mode.
+pub(crate) fn build_unregister_message() -> ZmqMessage {
+    build_dealer_message(&Bytes::from_static(b"_U"), Bytes::new())
 }
 
 /// Parses frames received by DEALER:
@@ -79,16 +96,40 @@ pub async fn run_dealer(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let topic_bytes = resolve_dealer_topic(&args.topic);
     let stdin = tokio::io::stdin();
     let mut reader = BufReader::new(stdin).lines();
+    if args.register {
+        println!("Worker registration enabled (sending _R every {}s, _U on exit).", REGISTER_INTERVAL.as_secs());
+    }
     println!("Enter messages to send (Ctrl+C to exit):");
 
+    let mut reg_interval = tokio::time::interval(REGISTER_INTERVAL);
     let mut stdin_active = true;
     let mut recv_count: usize = 0;
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
+                if args.register {
+                    let _ = tokio::time::timeout(
+                        CONTROL_SEND_TIMEOUT,
+                        socket.send(build_unregister_message()),
+                    )
+                    .await;
+                }
                 println!("\nShutdown requested, exiting dealer.");
                 break;
+            }
+            _ = async {
+                if args.register {
+                    reg_interval.tick().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                let _ = tokio::time::timeout(
+                    CONTROL_SEND_TIMEOUT,
+                    socket.send(build_register_message()),
+                )
+                .await;
             }
             line_res = async {
                 if stdin_active {
@@ -170,5 +211,21 @@ mod tests {
         let (t, p) = parse_dealer_frames(&msg_1);
         assert_eq!(t, "");
         assert_eq!(p, "only_payload");
+    }
+
+    // AC-DLR-04: worker register/unregister messages and 60s re-registration interval.
+    #[test]
+    fn ac_dlr_04_register_and_unregister_messages() {
+        assert_eq!(REGISTER_INTERVAL, Duration::from_secs(60));
+
+        let reg = build_register_message();
+        assert_eq!(reg.len(), 2);
+        assert_eq!(reg.get(0).unwrap().as_ref(), b"_R");
+        assert_eq!(reg.get(1).unwrap().as_ref(), b"");
+
+        let unreg = build_unregister_message();
+        assert_eq!(unreg.len(), 2);
+        assert_eq!(unreg.get(0).unwrap().as_ref(), b"_U");
+        assert_eq!(unreg.get(1).unwrap().as_ref(), b"");
     }
 }

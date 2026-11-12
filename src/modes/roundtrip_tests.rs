@@ -576,3 +576,238 @@ async fn ac_e2e_18_monitor_connect_and_disconnect_events() {
     }
     assert!(disconnected_found, "Expected to find [PEER] Disconnected event");
 }
+
+async fn spawn_test_broker() -> (
+    String,
+    String,
+    tokio::task::JoinHandle<super::broker_mode::BrokerStats>,
+) {
+    use super::broker_mode::{process_broker_message, BrokerStats, WorkerRegistry};
+    use zeromq::RouterSocket;
+
+    let mut router = RouterSocket::new();
+    let router_ep = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut pub_sock = PubSocket::new();
+    let pub_ep = pub_sock.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let handle = tokio::spawn(async move {
+        let mut reg = WorkerRegistry::default();
+        let mut stats = BrokerStats::default();
+        while let Ok(msg) = router.recv().await {
+            if process_broker_message(
+                &msg,
+                &mut router,
+                &mut pub_sock,
+                &mut reg,
+                &mut stats,
+                false,
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+        }
+        stats
+    });
+
+    (router_ep, pub_ep, handle)
+}
+
+// AC-E2E-19: Dealer -> Broker ROUTER -> Broker PUB -> Subscriber business message forwarding
+#[tokio::test]
+async fn ac_e2e_19_broker_publishes_business_messages_to_subscribers() {
+    use super::dealer_mode::{build_dealer_message, build_register_message};
+    use zeromq::DealerSocket;
+
+    let (router_ep, pub_ep, broker_handle) = spawn_test_broker().await;
+    let mut sub = connected_subscriber(&pub_ep, "").await;
+
+    let mut dealer = DealerSocket::new();
+    dealer.connect(&router_ep).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    // Control messages (_R, _CMD) must NOT be forwarded to PUB/SUB
+    dealer.send(build_register_message()).await.unwrap();
+    dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"_CMD"),
+            Bytes::from_static(b"internal"),
+        ))
+        .await
+        .unwrap();
+
+    // Business message must be published to SUB
+    dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"quote"),
+            Bytes::from_static(b"25.4"),
+        ))
+        .await
+        .unwrap();
+
+    let (topic, payload) = parse_message_frames(&recv(&mut sub).await);
+    assert_eq!(format_message_line(1, &topic, &payload), "[1] quote => 25.4");
+
+    broker_handle.abort();
+}
+
+// AC-E2E-20: Registered worker receives _CMD broadcast; unregistered dealer receives nothing
+#[tokio::test]
+async fn ac_e2e_20_broker_command_broadcast_to_registered_workers_only() {
+    use super::dealer_mode::{build_dealer_message, build_register_message, parse_dealer_frames};
+    use zeromq::DealerSocket;
+
+    let (router_ep, _pub_ep, broker_handle) = spawn_test_broker().await;
+
+    let mut worker_reg = DealerSocket::new();
+    worker_reg.connect(&router_ep).await.unwrap();
+
+    let mut worker_unreg = DealerSocket::new();
+    worker_unreg.connect(&router_ep).await.unwrap();
+
+    let mut cmd_dealer = DealerSocket::new();
+    cmd_dealer.connect(&router_ep).await.unwrap();
+
+    // Register worker_reg via _R; worker_unreg only sends a normal message
+    worker_reg.send(build_register_message()).await.unwrap();
+    worker_unreg
+        .send(build_dealer_message(
+            &Bytes::from_static(b"quote"),
+            Bytes::from_static(b"1.0"),
+        ))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Command dealer sends _CMD broadcast
+    cmd_dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"_CMD"),
+            Bytes::from_static(b"restart"),
+        ))
+        .await
+        .unwrap();
+
+    let reply = tokio::time::timeout(RECV_TIMEOUT, worker_reg.recv())
+        .await
+        .expect("timed out waiting for command broadcast on registered worker")
+        .unwrap();
+    let (topic, payload) = parse_dealer_frames(&reply);
+    assert_eq!((topic.as_str(), payload.as_str()), ("_CMD", "restart"));
+
+    // Unregistered dealer must not receive the command
+    let unreg_res = tokio::time::timeout(Duration::from_millis(150), worker_unreg.recv()).await;
+    assert!(unreg_res.is_err(), "Unregistered dealer should not receive command broadcast");
+
+    broker_handle.abort();
+}
+
+// AC-E2E-21: Worker _U unregisters and stops receiving commands; re-sending _R restores delivery
+#[tokio::test]
+async fn ac_e2e_21_broker_unregister_and_reregister_flow() {
+    use super::dealer_mode::{
+        build_dealer_message, build_register_message, build_unregister_message, parse_dealer_frames,
+    };
+    use zeromq::DealerSocket;
+
+    let (router_ep, _pub_ep, broker_handle) = spawn_test_broker().await;
+
+    let mut worker = DealerSocket::new();
+    worker.connect(&router_ep).await.unwrap();
+
+    let mut cmd_dealer = DealerSocket::new();
+    cmd_dealer.connect(&router_ep).await.unwrap();
+
+    // 1. Register
+    worker.send(build_register_message()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    cmd_dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"_CMD"),
+            Bytes::from_static(b"step1"),
+        ))
+        .await
+        .unwrap();
+    let msg1 = tokio::time::timeout(RECV_TIMEOUT, worker.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(parse_dealer_frames(&msg1), ("_CMD".to_string(), "step1".to_string()));
+
+    // 2. Unregister via _U
+    worker.send(build_unregister_message()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    cmd_dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"_CMD"),
+            Bytes::from_static(b"step2_dropped"),
+        ))
+        .await
+        .unwrap();
+    let dropped_res = tokio::time::timeout(Duration::from_millis(150), worker.recv()).await;
+    assert!(dropped_res.is_err(), "Unregistered worker must not receive step2");
+
+    // 3. Re-register via _R (simulating periodic re-registration)
+    worker.send(build_register_message()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    cmd_dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"_CMD"),
+            Bytes::from_static(b"step3_restored"),
+        ))
+        .await
+        .unwrap();
+    let msg3 = tokio::time::timeout(RECV_TIMEOUT, worker.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        parse_dealer_frames(&msg3),
+        ("_CMD".to_string(), "step3_restored".to_string())
+    );
+
+    broker_handle.abort();
+}
+
+// AC-E2E-22: Malformed non-3-frame messages are dropped without panic and broker continues serving
+#[tokio::test]
+async fn ac_e2e_22_broker_drops_malformed_frames_and_continues() {
+    use super::dealer_mode::build_dealer_message;
+    use zeromq::DealerSocket;
+
+    let (router_ep, pub_ep, broker_handle) = spawn_test_broker().await;
+    let mut sub = connected_subscriber(&pub_ep, "news").await;
+
+    let mut dealer = DealerSocket::new();
+    dealer.connect(&router_ep).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    // 1-frame from dealer => 2 frames on router (malformed, dropped)
+    let bad_1 = ZmqMessage::from(Bytes::from_static(b"only_one_frame"));
+    dealer.send(bad_1).await.unwrap();
+
+    // 3-frame from dealer => 4 frames on router (malformed, dropped)
+    let mut bad_3 = ZmqMessage::from(Bytes::from_static(b"news"));
+    bad_3.push_back(Bytes::from_static(b"p1"));
+    bad_3.push_back(Bytes::from_static(b"extra"));
+    dealer.send(bad_3).await.unwrap();
+
+    // Valid 2-frame from dealer => 3 frames on router (forwarded to PUB)
+    dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"news"),
+            Bytes::from_static(b"valid_after_drop"),
+        ))
+        .await
+        .unwrap();
+
+    let (topic, payload) = parse_message_frames(&recv(&mut sub).await);
+    assert_eq!((topic.as_str(), payload.as_str()), ("news", "valid_after_drop"));
+
+    broker_handle.abort();
+}
