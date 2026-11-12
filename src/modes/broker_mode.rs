@@ -1,7 +1,15 @@
 use bytes::Bytes;
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use zeromq::{PubSocket, RouterSocket, Socket, SocketRecv, SocketSend, ZmqMessage};
 
+use super::console::{
+    format_conn_count, format_console_help, format_unknown_command, format_uptime,
+    parse_console_command, ConnCounter, ConsoleCommand, STDIN_EOF_NOTICE,
+};
 use super::pub_mode::TwoPartSender;
 use super::router_mode::build_router_message;
 use super::sub_mode::bytes_to_display;
@@ -152,6 +160,47 @@ pub(crate) fn format_broker_summary(stats: &BrokerStats) -> String {
     )
 }
 
+/// Formats the `/s` interactive status output (including startup settings) for Broker mode.
+pub(crate) fn format_broker_status(
+    args: &crate::ZmqArgs,
+    uptime: Duration,
+    stats: &BrokerStats,
+    registry: &WorkerRegistry,
+    router_conns: Option<usize>,
+    pub_conns: Option<usize>,
+) -> String {
+    let ids = registry.ids();
+    let workers_str = if ids.is_empty() {
+        "-".to_string()
+    } else {
+        ids.iter()
+            .map(|id| bytes_to_display(id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let count_label = format!("workers ({})", ids.len());
+    let relay_ep = args.relay_endpoint.as_deref().unwrap_or("");
+    let mon = if args.monitor { "on " } else { "off" };
+    let dbg = if args.debug { "on" } else { "off" };
+    format!(
+        "[STATUS] broker | uptime {}\n  ROUTER : bind {}\n  PUB    : bind {}\n  monitor: {}   debug: {}\n  published               : {}\n  commands broadcast      : {}\n  registered / unregistered / dropped : {} / {} / {}\n  {:<23} : {}\n  ROUTER connections      : {}\n  PUB connections         : {}",
+        format_uptime(uptime),
+        args.endpoint,
+        relay_ep,
+        mon,
+        dbg,
+        stats.published,
+        stats.commands,
+        stats.registered,
+        stats.unregistered,
+        stats.dropped,
+        count_label,
+        workers_str,
+        format_conn_count(router_conns),
+        format_conn_count(pub_conns)
+    )
+}
+
 /// Checks and warns about parameters that are ignored in broker mode.
 pub(crate) fn check_broker_warnings(args: &crate::ZmqArgs) {
     if args.topic != "*" {
@@ -244,24 +293,30 @@ pub async fn run_broker(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let mut router = RouterSocket::new();
     let mut pub_sock = PubSocket::new();
 
-    let _router_monitor_handle = if args.monitor {
-        Some(super::monitor::spawn_socket_monitor(
+    let (router_counter, _router_monitor_handle) = if args.monitor {
+        let c: ConnCounter = Arc::new(AtomicUsize::new(0));
+        let h = super::monitor::spawn_socket_monitor_tracked(
             router.monitor(),
             Some("[ROUTER]"),
             args.debug,
-        ))
+            Some(c.clone()),
+        );
+        (Some(c), Some(h))
     } else {
-        None
+        (None, None)
     };
 
-    let _pub_monitor_handle = if args.monitor {
-        Some(super::monitor::spawn_socket_monitor(
+    let (pub_counter, _pub_monitor_handle) = if args.monitor {
+        let c: ConnCounter = Arc::new(AtomicUsize::new(0));
+        let h = super::monitor::spawn_socket_monitor_tracked(
             pub_sock.monitor(),
             Some("[PUB]"),
             args.debug,
-        ))
+            Some(c.clone()),
+        );
+        (Some(c), Some(h))
     } else {
-        None
+        (None, None)
     };
 
     router.bind(&args.endpoint).await?;
@@ -270,8 +325,12 @@ pub async fn run_broker(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     pub_sock.bind(relay_endpoint).await?;
     println!("PUB bound to {}", relay_endpoint);
 
-    println!("Broker running (Ctrl+C to exit)...");
+    println!("Broker running (/h for commands, Ctrl+C to exit)...");
 
+    let start_time = Instant::now();
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin).lines();
+    let mut stdin_active = true;
     let mut registry = WorkerRegistry::default();
     let mut stats = BrokerStats::default();
 
@@ -281,6 +340,48 @@ pub async fn run_broker(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
                 println!("\nShutdown requested, exiting broker.");
                 println!("{}", format_broker_summary(&stats));
                 break;
+            }
+            line_res = async {
+                if stdin_active {
+                    reader.next_line().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                match line_res? {
+                    Some(line) => match parse_console_command(&line) {
+                        ConsoleCommand::Status => {
+                            let r_c = router_counter.as_ref().map(|c| c.load(Ordering::Relaxed));
+                            let p_c = pub_counter.as_ref().map(|c| c.load(Ordering::Relaxed));
+                            println!(
+                                "{}",
+                                format_broker_status(
+                                    &args,
+                                    start_time.elapsed(),
+                                    &stats,
+                                    &registry,
+                                    r_c,
+                                    p_c,
+                                )
+                            );
+                        }
+                        ConsoleCommand::Help => {
+                            println!("{}", format_console_help());
+                        }
+                        ConsoleCommand::Quit => {
+                            println!("Shutdown requested, exiting broker.");
+                            println!("{}", format_broker_summary(&stats));
+                            break;
+                        }
+                        ConsoleCommand::Unknown(cmd) => {
+                            println!("{}", format_unknown_command(&cmd));
+                        }
+                    },
+                    None => {
+                        stdin_active = false;
+                        println!("{}", STDIN_EOF_NOTICE);
+                    }
+                }
             }
             recv_res = router.recv() => {
                 let msg = recv_res?;
@@ -488,5 +589,89 @@ mod tests {
             format_broker_summary(&stats),
             "Broker summary: published 10 message(s), broadcast 2 command(s), 3 registered, 1 unregistered, 4 dropped."
         );
+    }
+
+    // AC-BRK-08: format_broker_status with workers, empty workers, settings and connection counts
+    #[test]
+    fn ac_brk_08_format_broker_status() {
+        use clap::Parser;
+        let args = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "broker",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:55555",
+            "--monitor",
+        ])
+        .unwrap();
+
+        let mut reg = WorkerRegistry::default();
+        reg.register(Bytes::from_static(b"worker-1"));
+        reg.register(Bytes::from_static(b"worker-2"));
+
+        let stats = BrokerStats {
+            published: 120,
+            commands: 4,
+            registered: 3,
+            unregistered: 1,
+            dropped: 2,
+        };
+
+        let s_with_mon =
+            format_broker_status(&args, Duration::from_secs(310), &stats, &reg, Some(5), Some(3));
+        assert_eq!(
+            s_with_mon,
+            "[STATUS] broker | uptime 00:05:10\n  ROUTER : bind tcp://127.0.0.1:55550\n  PUB    : bind tcp://127.0.0.1:55555\n  monitor: on    debug: off\n  published               : 120\n  commands broadcast      : 4\n  registered / unregistered / dropped : 3 / 1 / 2\n  workers (2)             : worker-1, worker-2\n  ROUTER connections      : 5\n  PUB connections         : 3"
+        );
+
+        let args_no_mon = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "broker",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:55555",
+        ])
+        .unwrap();
+        let empty_reg = WorkerRegistry::default();
+        let empty_stats = BrokerStats::default();
+        let s_no_mon = format_broker_status(
+            &args_no_mon,
+            Duration::from_secs(0),
+            &empty_stats,
+            &empty_reg,
+            None,
+            None,
+        );
+        assert_eq!(
+            s_no_mon,
+            "[STATUS] broker | uptime 00:00:00\n  ROUTER : bind tcp://127.0.0.1:55550\n  PUB    : bind tcp://127.0.0.1:55555\n  monitor: off   debug: off\n  published               : 0\n  commands broadcast      : 0\n  registered / unregistered / dropped : 0 / 0 / 0\n  workers (0)             : -\n  ROUTER connections      : n/a (use --monitor)\n  PUB connections         : n/a (use --monitor)"
+        );
+    }
+
+    // AC-BRK-09: format_broker_status reflects settings variations (endpoints and debug)
+    #[test]
+    fn ac_brk_09_format_broker_settings() {
+        use clap::Parser;
+        let args = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "broker",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:55555",
+            "--debug",
+        ])
+        .unwrap();
+        let empty_reg = WorkerRegistry::default();
+        let empty_stats = BrokerStats::default();
+        let s = format_broker_status(&args, Duration::from_secs(0), &empty_stats, &empty_reg, None, None);
+        assert!(s.contains("ROUTER : bind tcp://127.0.0.1:55550"));
+        assert!(s.contains("PUB    : bind tcp://127.0.0.1:55555"));
+        assert!(s.contains("monitor: off   debug: on"));
     }
 }

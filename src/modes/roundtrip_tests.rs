@@ -811,3 +811,48 @@ async fn ac_e2e_22_broker_drops_malformed_frames_and_continues() {
 
     broker_handle.abort();
 }
+
+// AC-E2E-23: spawn_socket_monitor_tracked updates ConnCounter to 1 on connect and 0 on disconnect
+#[tokio::test]
+async fn ac_e2e_23_monitor_tracked_connection_counter() {
+    use super::console::ConnCounter;
+    use super::monitor::spawn_socket_monitor_tracked;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let mut server = PubSocket::new();
+    let counter: ConnCounter = Arc::new(AtomicUsize::new(0));
+    let _mon_handle = spawn_socket_monitor_tracked(
+        server.monitor(),
+        Some("[PUB]"),
+        false,
+        Some(counter.clone()),
+    );
+    let endpoint = server.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let mut client = SubSocket::new();
+    client.connect(&endpoint).await.unwrap();
+
+    let timeout_duration = Duration::from_secs(2);
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout_duration && counter.load(Ordering::Relaxed) != 1 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        1,
+        "Expected ConnCounter to reach 1 after client connect"
+    );
+
+    drop(client);
+
+    let start_disc = std::time::Instant::now();
+    while start_disc.elapsed() < timeout_duration && counter.load(Ordering::Relaxed) != 0 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        counter.load(Ordering::Relaxed),
+        0,
+        "Expected ConnCounter to return to 0 after client disconnect"
+    );
+}

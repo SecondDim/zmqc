@@ -1,6 +1,14 @@
 use std::error::Error;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use zeromq::{Socket, SocketRecv, SocketSend, XPubSocket, XSubSocket, ZmqMessage};
 
+use super::console::{
+    format_conn_count, format_console_help, format_unknown_command, format_uptime,
+    parse_console_command, ConnCounter, ConsoleCommand, STDIN_EOF_NOTICE,
+};
 use super::sub_mode::{bytes_to_display, parse_message_frames};
 
 /// Parses an XPUB subscription message frame into (is_subscribe, topic_display).
@@ -52,6 +60,40 @@ pub(crate) fn format_proxy_summary(data_count: usize, sub_count: usize) -> Strin
     )
 }
 
+/// Formats the `/s` interactive status output (including startup settings) for Proxy mode.
+pub(crate) fn format_proxy_status(
+    args: &crate::ZmqArgs,
+    uptime: Duration,
+    data_count: usize,
+    sub_count: usize,
+    xpub_conns: Option<usize>,
+    xsub_conns: Option<usize>,
+) -> String {
+    let xpub_role = if crate::resolve_bind_flag(args.mode, args.bind, args.connect) {
+        "bind   "
+    } else {
+        "connect"
+    };
+    let xsub_role = if args.relay_bind { "bind   " } else { "connect" };
+    let relay_ep = args.relay_endpoint.as_deref().unwrap_or("");
+    let mon = if args.monitor { "on " } else { "off" };
+    let dbg = if args.debug { "on" } else { "off" };
+    format!(
+        "[STATUS] proxy | uptime {}\n  XPUB : {} {}\n  XSUB : {} {}\n  monitor: {}   debug: {}\n  data messages forwarded : {}\n  subscription events     : {}\n  XPUB connections        : {}\n  XSUB connections        : {}",
+        format_uptime(uptime),
+        xpub_role,
+        args.endpoint,
+        xsub_role,
+        relay_ep,
+        mon,
+        dbg,
+        data_count,
+        sub_count,
+        format_conn_count(xpub_conns),
+        format_conn_count(xsub_conns)
+    )
+}
+
 /// Checks and warns about parameters that are ignored in proxy mode.
 pub(crate) fn check_proxy_warnings(args: &crate::ZmqArgs) {
     if args.topic != "*" {
@@ -73,24 +115,30 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
     let mut xpub = XPubSocket::new();
     let mut xsub = XSubSocket::new();
 
-    let _xpub_monitor_handle = if args.monitor {
-        Some(super::monitor::spawn_socket_monitor(
+    let (xpub_counter, _xpub_monitor_handle) = if args.monitor {
+        let c: ConnCounter = Arc::new(AtomicUsize::new(0));
+        let h = super::monitor::spawn_socket_monitor_tracked(
             xpub.monitor(),
             Some("[XPUB]"),
             args.debug,
-        ))
+            Some(c.clone()),
+        );
+        (Some(c), Some(h))
     } else {
-        None
+        (None, None)
     };
 
-    let _xsub_monitor_handle = if args.monitor {
-        Some(super::monitor::spawn_socket_monitor(
+    let (xsub_counter, _xsub_monitor_handle) = if args.monitor {
+        let c: ConnCounter = Arc::new(AtomicUsize::new(0));
+        let h = super::monitor::spawn_socket_monitor_tracked(
             xsub.monitor(),
             Some("[XSUB]"),
             args.debug,
-        ))
+            Some(c.clone()),
+        );
+        (Some(c), Some(h))
     } else {
-        None
+        (None, None)
     };
 
     let xpub_bind = crate::resolve_bind_flag(args.mode, args.bind, args.connect);
@@ -115,8 +163,12 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
         println!("XSUB connected to {}", relay_endpoint);
     }
 
-    println!("Proxy running (Ctrl+C to exit)...");
+    println!("Proxy running (/h for commands, Ctrl+C to exit)...");
 
+    let start_time = Instant::now();
+    let stdin = tokio::io::stdin();
+    let mut reader = BufReader::new(stdin).lines();
+    let mut stdin_active = true;
     let mut data_count: usize = 0;
     let mut sub_count: usize = 0;
 
@@ -126,6 +178,48 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
                 println!("\nShutdown requested, exiting proxy.");
                 println!("{}", format_proxy_summary(data_count, sub_count));
                 break;
+            }
+            line_res = async {
+                if stdin_active {
+                    reader.next_line().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                match line_res? {
+                    Some(line) => match parse_console_command(&line) {
+                        ConsoleCommand::Status => {
+                            let xpub_c = xpub_counter.as_ref().map(|c| c.load(Ordering::Relaxed));
+                            let xsub_c = xsub_counter.as_ref().map(|c| c.load(Ordering::Relaxed));
+                            println!(
+                                "{}",
+                                format_proxy_status(
+                                    &args,
+                                    start_time.elapsed(),
+                                    data_count,
+                                    sub_count,
+                                    xpub_c,
+                                    xsub_c,
+                                )
+                            );
+                        }
+                        ConsoleCommand::Help => {
+                            println!("{}", format_console_help());
+                        }
+                        ConsoleCommand::Quit => {
+                            println!("Shutdown requested, exiting proxy.");
+                            println!("{}", format_proxy_summary(data_count, sub_count));
+                            break;
+                        }
+                        ConsoleCommand::Unknown(cmd) => {
+                            println!("{}", format_unknown_command(&cmd));
+                        }
+                    },
+                    None => {
+                        stdin_active = false;
+                        println!("{}", STDIN_EOF_NOTICE);
+                    }
+                }
             }
             data_res = xsub.recv() => {
                 let msg = data_res?;
@@ -225,5 +319,86 @@ mod tests {
             format_proxy_summary(42, 3),
             "Proxy summary: forwarded 42 data message(s), 3 subscription event(s)."
         );
+    }
+
+    // AC-PRX-07: format_proxy_status with settings and connection counts
+    #[test]
+    fn ac_proxy_07_format_proxy_status() {
+        use clap::Parser;
+        let args = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "proxy",
+            "--endpoint",
+            "tcp://127.0.0.1:5556",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:5555",
+            "--monitor",
+            "--debug",
+        ])
+        .unwrap();
+
+        let s_with_mon =
+            format_proxy_status(&args, Duration::from_secs(62), 42, 3, Some(2), Some(1));
+        assert_eq!(
+            s_with_mon,
+            "[STATUS] proxy | uptime 00:01:02\n  XPUB : bind    tcp://127.0.0.1:5556\n  XSUB : connect tcp://127.0.0.1:5555\n  monitor: on    debug: on\n  data messages forwarded : 42\n  subscription events     : 3\n  XPUB connections        : 2\n  XSUB connections        : 1"
+        );
+
+        let args_no_mon = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "proxy",
+            "--endpoint",
+            "tcp://127.0.0.1:5556",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:5555",
+        ])
+        .unwrap();
+        let s_no_mon =
+            format_proxy_status(&args_no_mon, Duration::from_secs(0), 0, 0, None, None);
+        assert_eq!(
+            s_no_mon,
+            "[STATUS] proxy | uptime 00:00:00\n  XPUB : bind    tcp://127.0.0.1:5556\n  XSUB : connect tcp://127.0.0.1:5555\n  monitor: off   debug: off\n  data messages forwarded : 0\n  subscription events     : 0\n  XPUB connections        : n/a (use --monitor)\n  XSUB connections        : n/a (use --monitor)"
+        );
+    }
+
+    // AC-PRX-08: format_proxy_status reflects bind/connect and relay-bind variations
+    #[test]
+    fn ac_proxy_08_format_proxy_settings_variations() {
+        use clap::Parser;
+        let args1 = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "proxy",
+            "--endpoint",
+            "tcp://127.0.0.1:5556",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:5555",
+            "--debug",
+        ])
+        .unwrap();
+        let s1 = format_proxy_status(&args1, Duration::from_secs(10), 0, 0, None, None);
+        assert!(s1.contains("XPUB : bind    tcp://127.0.0.1:5556"));
+        assert!(s1.contains("XSUB : connect tcp://127.0.0.1:5555"));
+        assert!(s1.contains("monitor: off   debug: on"));
+
+        let args2 = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "proxy",
+            "--endpoint",
+            "tcp://127.0.0.1:5556",
+            "--connect",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:5555",
+            "--relay-bind",
+            "--monitor",
+        ])
+        .unwrap();
+        let s2 = format_proxy_status(&args2, Duration::from_secs(20), 5, 1, Some(0), Some(0));
+        assert!(s2.contains("XPUB : connect tcp://127.0.0.1:5556"));
+        assert!(s2.contains("XSUB : bind    tcp://127.0.0.1:5555"));
+        assert!(s2.contains("monitor: on    debug: off"));
     }
 }

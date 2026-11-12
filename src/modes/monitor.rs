@@ -1,6 +1,7 @@
 use futures_channel::mpsc::Receiver;
 use zeromq::SocketEvent;
 
+use super::console::{apply_connection_event, ConnCounter};
 use super::sub_mode::bytes_to_display;
 
 /// Formats a `SocketEvent` into a console output message.
@@ -74,13 +75,27 @@ pub(crate) fn format_socket_event(
 
 /// Spawns a background task that listens for `SocketEvent`s and prints formatted messages.
 pub(crate) fn spawn_socket_monitor(
+    receiver: Receiver<SocketEvent>,
+    prefix: Option<&'static str>,
+    debug: bool,
+) -> tokio::task::JoinHandle<()> {
+    spawn_socket_monitor_tracked(receiver, prefix, debug, None)
+}
+
+/// Spawns a background task that listens for `SocketEvent`s, optionally updates a live
+/// `ConnCounter`, and prints formatted messages.
+pub(crate) fn spawn_socket_monitor_tracked(
     mut receiver: Receiver<SocketEvent>,
     prefix: Option<&'static str>,
     debug: bool,
+    counter: Option<ConnCounter>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use futures_util::StreamExt;
         while let Some(event) = receiver.next().await {
+            if let Some(ref c) = counter {
+                apply_connection_event(&event, c);
+            }
             if let Some(msg) = format_socket_event(&event, prefix, debug) {
                 println!("{}", msg);
             }
@@ -217,5 +232,36 @@ mod tests {
             format_socket_event(&close_failed, None, true),
             Some("[PEER] Close failed".to_string())
         );
+    }
+
+    // AC-MON-06: apply_connection_event increments on Accepted/Connected and saturating-decrements on Disconnected
+    #[test]
+    fn ac_mon_06_apply_connection_event() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let c = AtomicUsize::new(0);
+        let ep = test_endpoint("tcp://127.0.0.1:5555");
+        let id = test_peer_id(b"peer1");
+
+        // Disconnected at 0 must not underflow
+        apply_connection_event(&SocketEvent::Disconnected(id.clone()), &c);
+        assert_eq!(c.load(Ordering::Relaxed), 0);
+
+        // Accepted +1, Connected +1 => 2
+        apply_connection_event(&SocketEvent::Accepted(ep.clone(), id.clone()), &c);
+        assert_eq!(c.load(Ordering::Relaxed), 1);
+        apply_connection_event(&SocketEvent::Connected(ep.clone(), id.clone()), &c);
+        assert_eq!(c.load(Ordering::Relaxed), 2);
+
+        // Non-connection events leave counter unchanged
+        apply_connection_event(&SocketEvent::Listening(ep), &c);
+        apply_connection_event(&SocketEvent::ConnectDelayed, &c);
+        assert_eq!(c.load(Ordering::Relaxed), 2);
+
+        // Disconnected -1 => 1, then -1 => 0
+        apply_connection_event(&SocketEvent::Disconnected(id.clone()), &c);
+        assert_eq!(c.load(Ordering::Relaxed), 1);
+        apply_connection_event(&SocketEvent::Disconnected(id), &c);
+        assert_eq!(c.load(Ordering::Relaxed), 0);
     }
 }

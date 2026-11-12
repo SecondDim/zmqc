@@ -149,6 +149,10 @@ Both `dealer` and `router` are **bidirectional modes** (capable of simultaneous 
 *   **Live Inspection (`--debug`)**:
     *   Shows data messages in real-time: `[RELAY] [{seq}] {topic} => {payload}`.
     *   Shows subscription events: `[SUB] subscribe '{topic}'` or `[SUB] unsubscribe '{topic}'`.
+*   **Interactive stdin Console (`/s`, `/h` or `/?`, `/q`)**:
+    *   `/s` (or direct Enter): Displays `[STATUS] proxy | uptime HH:MM:SS`, startup settings (endpoints, `bind`/`connect` roles, `monitor`/`debug` flags), forwarded message/subscription counts, and live `XPUB`/`XSUB` connection counts (when `--monitor` is enabled; otherwise `n/a (use --monitor)`). Pressing Enter directly without input defaults to `/s`.
+    *   `/h` or `/?`: Prints command help; `/q`: Gracefully shuts down and prints the summary (same as `Ctrl+C`).
+    *   When stdin reaches EOF (e.g. background execution), prints a one-time notice and continues running until `Ctrl+C`.
 *   **Graceful Flag Handling**:
     *   `--topic` and `--file` are ignored with a warning and do not halt execution.
 
@@ -163,9 +167,10 @@ Both `dealer` and `router` are **bidirectional modes** (capable of simultaneous 
     *   Workers can pass `--register` in `dealer` mode (`zmqc -m dealer -e <router_url> --register`) to automatically send `_R` on startup, re-send `_R` every 60 seconds (surviving broker restarts), and send `_U` on Ctrl+C.
 *   **Business Message Publishing (non-`_` topic)**:
     *   Forwards `[topic, payload]` directly to the `PUB` socket for downstream Subscribers.
-*   **Quiet Mode, `--debug`, and Exit Summary**:
-    *   Runs quietly by default; on Ctrl+C prints: `Broker summary: published {p} message(s), broadcast {c} command(s), {r} registered, {u} unregistered, {d} dropped.`
+*   **Quiet Mode, `--debug`, Interactive Console, and Exit Summary**:
+    *   Runs quietly by default; on `Ctrl+C` or `/q` prints: `Broker summary: published {p} message(s), broadcast {c} command(s), {r} registered, {u} unregistered, {d} dropped.`
     *   With `--debug`, prints `[DATA]`, `[CMD]`, and `[REG]` events in real time.
+    *   Supports interactive stdin commands: `/s` (or direct Enter: live status including uptime, startup settings, counters, registered worker identities, and `ROUTER`/`PUB` connection counts when `--monitor` is enabled), `/h` or `/?` (help), and `/q` (graceful quit).
 
 > [!NOTE]
 > `zeromq 0.6.0` `SocketOptions` only exposes `peer_identity`; low-level libzmq/NetMQ socket options (`ROUTER_HANDOVER`, `SNDHWM`/`RCVHWM`, `SNDBUF`/`RCVBUF`, `TCP_KEEPALIVE`) are not configurable.
@@ -440,6 +445,10 @@ cargo build --release
 *   **即時監控 (`--debug`)**：
     *   即時輸出資料訊息：`[RELAY] [{序號}] {topic} => {payload}`。
     *   即時輸出訂閱事件：`[SUB] subscribe '{topic}'` 或 `[SUB] unsubscribe '{topic}'`。
+*   **互動式終端指令 (`/s`, `/h` 或 `/?`, `/q`)**：
+    *   `/s`（或直接按下 Enter）：顯示 `[STATUS] proxy | uptime HH:MM:SS`、啟動設定（端點、`bind`/`connect` 模式、`monitor`/`debug` 狀態）、已轉發之資料與訂閱事件數，以及 `XPUB`/`XSUB` 目前連線數（需啟用 `--monitor`，否則顯示 `n/a (use --monitor)`）。直接按下 Enter（未輸入）預設執行 `/s`。
+    *   `/h` 或 `/?`：顯示指令說明；`/q`：優雅退出並印出統計摘要（等同 `Ctrl+C`）。
+    *   當 stdin 遇到 EOF（如背景或管線執行）時，印出一次提示並持續運行直到按下 `Ctrl+C`。
 *   **參數容錯**：
     *   若傳入 `--topic` 或 `--file`，會印出 Warning 提示並自動忽略，維持正常運作。
 
@@ -454,9 +463,10 @@ cargo build --release
     *   Worker 端可在 `dealer` 模式加上 `--register`（`zmqc -m dealer -e <router_url> --register`），啟動後立即發送 `_R`、連線期間每 60 秒重新發送 `_R`（防止 Broker 重啟後遺失註冊表），並於 Ctrl+C 結束時自動發送 `_U`。
 *   **一般業務訊息發布（非 `_` 開頭主題）**：
     *   直接透過 `PUB` Socket 以 2 幀 `[topic, payload]` 發布給所有訂閱者（Subscriber）。
-*   **安靜模式、`--debug` 與結束統計**：
-    *   預設安靜執行，按下 `Ctrl+C` 時印出統計：`Broker summary: published {p} message(s), broadcast {c} command(s), {r} registered, {u} unregistered, {d} dropped.`
+*   **安靜模式、`--debug`、互動式指令與結束統計**：
+    *   預設安靜執行，按下 `Ctrl+C` 或輸入 `/q` 時印出統計：`Broker summary: published {p} message(s), broadcast {c} command(s), {r} registered, {u} unregistered, {d} dropped.`
     *   加上 `--debug` 可即時印出 `[DATA]`、`[CMD]` 與 `[REG]` 事件。
+    *   支援終端機 stdin 互動指令：`/s`（或直接按下 Enter：即時狀態包含運行時間、啟動設定、各項計數、已註冊 Worker 清單，以及啟用 `--monitor` 時的 `ROUTER`/`PUB` 目前連線數）、`/h` 或 `/?`（說明）與 `/q`（優雅退出）。直接按下 Enter（未輸入）預設執行 `/s`。
 
 > [!NOTE]
 > `zeromq 0.6.0` 的 `SocketOptions` 僅開放 `peer_identity`，因此低階 `libzmq`/`NetMQ` 參數（如 `ROUTER_HANDOVER`、`SNDHWM`/`RCVHWM`、`SNDBUF`/`RCVBUF`、`TCP_KEEPALIVE`）無法透過此版本設定。
