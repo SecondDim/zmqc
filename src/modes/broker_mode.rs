@@ -10,6 +10,7 @@ use super::console::{
     format_conn_count, format_console_help, format_unknown_command, format_uptime,
     parse_console_command, ConnCounter, ConsoleCommand, STDIN_EOF_NOTICE,
 };
+use super::metrics::{spawn_metrics_server, MetricsState};
 use super::pub_mode::TwoPartSender;
 use super::router_mode::build_router_message;
 use super::sub_mode::bytes_to_display;
@@ -90,7 +91,6 @@ impl WorkerRegistry {
     }
 
     /// Returns the number of currently registered workers.
-    #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.workers.len()
     }
@@ -182,13 +182,18 @@ pub(crate) fn format_broker_status(
     let relay_ep = args.relay_endpoint.as_deref().unwrap_or("");
     let mon = if args.monitor { "on " } else { "off" };
     let dbg = if args.debug { "on" } else { "off" };
+    let metrics_line = match args.metrics_addr {
+        Some(addr) => format!("\n  metrics: http://{}/metrics", addr),
+        None => String::new(),
+    };
     format!(
-        "[STATUS] broker | uptime {}\n  ROUTER : bind {}\n  PUB    : bind {}\n  monitor: {}   debug: {}\n  published               : {}\n  commands broadcast      : {}\n  registered / unregistered / dropped : {} / {} / {}\n  {:<23} : {}\n  ROUTER connections      : {}\n  PUB connections         : {}",
+        "[STATUS] broker | uptime {}\n  ROUTER : bind {}\n  PUB    : bind {}\n  monitor: {}   debug: {}{}\n  published               : {}\n  commands broadcast      : {}\n  registered / unregistered / dropped : {} / {} / {}\n  {:<23} : {}\n  ROUTER connections      : {}\n  PUB connections         : {}",
         format_uptime(uptime),
         args.endpoint,
         relay_ep,
         mon,
         dbg,
+        metrics_line,
         stats.published,
         stats.commands,
         stats.registered,
@@ -319,6 +324,23 @@ pub async fn run_broker(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
         (None, None)
     };
 
+    // Bind metrics listener before ZMQ sockets so port conflicts fail fast
+    let (metrics_state, metrics_handle) = if let Some(m_addr) = args.metrics_addr {
+        let mut conns = Vec::with_capacity(2);
+        if let Some(c) = &router_counter {
+            conns.push(("router", c.clone()));
+        }
+        if let Some(c) = &pub_counter {
+            conns.push(("pub", c.clone()));
+        }
+        let state = MetricsState::new(crate::Mode::Broker, conns);
+        let (bound_addr, handle) = spawn_metrics_server(m_addr, state.clone()).await?;
+        println!("Metrics listening on http://{}/metrics", bound_addr);
+        (Some(state), Some(handle))
+    } else {
+        (None, None)
+    };
+
     router.bind(&args.endpoint).await?;
     println!("ROUTER bound to {}", args.endpoint);
 
@@ -393,8 +415,15 @@ pub async fn run_broker(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
                     &mut stats,
                     args.debug,
                 ).await?;
+                if let Some(m) = &metrics_state {
+                    m.sync_broker(&stats, registry.len());
+                }
             }
         }
+    }
+
+    if let Some(h) = metrics_handle {
+        h.abort();
     }
 
     Ok(())
@@ -673,5 +702,28 @@ mod tests {
         assert!(s.contains("ROUTER : bind tcp://127.0.0.1:55550"));
         assert!(s.contains("PUB    : bind tcp://127.0.0.1:55555"));
         assert!(s.contains("monitor: off   debug: on"));
+
+        let args_met = crate::ZmqArgs::try_parse_from([
+            "zmqc",
+            "--mode",
+            "broker",
+            "--endpoint",
+            "tcp://127.0.0.1:55550",
+            "--relay-endpoint",
+            "tcp://127.0.0.1:55555",
+            "--monitor",
+            "--metrics-addr",
+            "127.0.0.1:9100",
+        ])
+        .unwrap();
+        let s_met = format_broker_status(
+            &args_met,
+            Duration::from_secs(0),
+            &empty_stats,
+            &empty_reg,
+            Some(0),
+            Some(0),
+        );
+        assert!(s_met.contains("metrics: http://127.0.0.1:9100/metrics"));
     }
 }

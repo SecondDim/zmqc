@@ -81,6 +81,7 @@ Run `zmqc --help` to view full help details. Below are the primary arguments:
 | `-c, --connect` | Flag | `false` | Explicitly forces socket to connect (`bind=false`). Applicable to all modes (Router and Broker always bind). |
 | `--relay-bind` | Flag | `false` | **Proxy mode only**: If specified, the XSUB socket executes `bind` (defaults to `connect`; rejected in `broker` mode). |
 | `--monitor` | Flag | `false` | Monitors remote peer connect, disconnect, and handshake failure events (`[PEER] Connected: ...`, `[PEER] Disconnected: ...`). Supported across all modes. |
+| `--metrics-addr <addr>` | Optional | - | **Proxy & Broker modes only (requires `--monitor`)**: Exposes a Prometheus text format 0.0.4 HTTP endpoint at `http://<addr>/metrics` (e.g. `127.0.0.1:9100`, `0.0.0.0:9100`; IP:Port only). |
 | `-d, --debug` | Flag | `false` | Enables live console output for proxy (`[RELAY]`, `[SUB]`) and broker (`[DATA]`, `[CMD]`, `[REG]`); combined with `--monitor`, outputs internal socket lifecycle events across all modes. |
 | `-t, --topic <string>` | Optional | `*` | Message topic. **PUB mode**: empty string or `*` is not allowed; **SUB mode**: topic starting with `*` automatically resolves to `""` to receive all messages; **DEALER/ROUTER mode**: `*` or `""` is treated as an empty topic frame; **PROXY/BROKER mode**: ignored with a warning. |
 | `-f, --file <path>` | Optional | - | **PUB mode**: file path to read and publish; **SUB mode**: file path to write received messages (**forbidden in DEALER/ROUTER; ignored with warning in PROXY/BROKER**). |
@@ -183,6 +184,21 @@ Available in all modes (both `bind` and `connect`). Prints peer lifecycle events
 *   In **proxy** mode, events are tagged `[PEER] [XPUB] ...` and `[PEER] [XSUB] ...`; in **broker** mode, events are tagged `[PEER] [ROUTER] ...` and `[PEER] [PUB] ...`.
 *   Add `--debug` to also show internal events (`Listening`, `ConnectDelayed`, `ConnectRetried`, `Closed`, `CloseFailed`).
 *   Identities that are not valid UTF-8 are shown as lowercase hex.
+
+#### 7. Prometheus Metrics Exporter (`--metrics-addr`)
+Available in **proxy** and **broker** modes when paired with `--monitor`:
+*   **Activation**: `--metrics-addr <IP:PORT>` (e.g. `127.0.0.1:9100` or `0.0.0.0:9100`; parsed as `std::net::SocketAddr`, hostnames like `localhost:9100` are not accepted).
+*   **HTTP Endpoints & Concurrency**:
+    *   `GET /metrics`: Prometheus text exposition format 0.0.4 (`text/plain; version=0.0.4; charset=utf-8`).
+    *   `GET /`: Plain-text notice pointing to `/metrics`; other paths return `404 Not Found`; non-`GET` methods return `405 Method Not Allowed`.
+    *   Limits concurrent HTTP connections to **1** (sequentially processed in a single accept loop with a 5-second timeout and 8 KiB request header cap).
+*   **Exported Metrics**:
+    *   Common: `zmqc_up` (gauge), `zmqc_uptime_seconds` (gauge), `zmqc_build_info{version,mode}` (gauge), `zmqc_connections{socket="xpub|xsub|router|pub"}` (gauge).
+    *   Proxy mode: `zmqc_proxy_messages_forwarded_total` (counter), `zmqc_proxy_subscription_events_total` (counter).
+    *   Broker mode: `zmqc_broker_messages_published_total` (counter), `zmqc_broker_commands_broadcast_total` (counter), `zmqc_broker_registrations_total` (counter), `zmqc_broker_unregistrations_total` (counter), `zmqc_broker_messages_dropped_total` (counter), `zmqc_broker_registered_workers` (gauge).
+
+> [!WARNING]
+> The metrics HTTP listener does not provide authentication or TLS. Binding to `0.0.0.0` exposes operational counters to the network (no message payloads or topics are exposed); prefer binding to `127.0.0.1` or an internal interface.
 
 ---
 
@@ -377,6 +393,7 @@ cargo build --release
 | `-c, --connect` | 開關 | `false` | 強制將連線行為設定為 connect（`bind=false`），適用於所有模式（Router 與 Broker 永遠 bind）。 |
 | `--relay-bind` | 開關 | `false` | **Proxy 模式專用**：若加上此參數，XSUB 端點執行 `bind`（預設為 `connect`；Broker 模式禁止使用）。 |
 | `--monitor` | 開關 | `false` | 監控遠端 Peer 的連線、斷線與握手失敗事件（`[PEER] Connected: ...`、`[PEER] Disconnected: ...`），適用於所有模式。 |
+| `--metrics-addr <addr>` | 選填 | - | **Proxy 與 Broker 模式專用（需搭配 `--monitor`）**：於 `http://<addr>/metrics` 暴露 Prometheus text format 0.0.4 監控指標（例如 `127.0.0.1:9100`、`0.0.0.0:9100`；僅接受 IP:Port）。 |
 | `-d, --debug` | 開關 | `false` | Proxy 模式即時輸出 `[RELAY]`/`[SUB]`，Broker 模式即時輸出 `[DATA]`/`[CMD]`/`[REG]`；搭配 `--monitor` 時，所有模式額外輸出 Socket 內部事件。 |
 | `-t, --topic <string>` | 選填 | `*` | 訊息主題。**PUB 模式**：不允許為空字串或 `*`；**SUB 模式**：主題開頭為 `*` 時自動解析為 `""` 接收全部資料；**DEALER/ROUTER 模式**：`*` 或 `""` 視為空 topic frame；**PROXY/BROKER 模式**：忽略並輸出警告。 |
 | `-f, --file <path>` | 選填 | - | **PUB 模式**：要讀取並發送的檔案路徑；**SUB 模式**：要寫入接收訊息的檔案路徑（**DEALER/ROUTER 不支援；PROXY/BROKER 模式忽略並輸出警告**）。 |
@@ -479,6 +496,21 @@ cargo build --release
 *   **Proxy** 模式會以角色標籤區分：`[PEER] [XPUB] ...` 與 `[PEER] [XSUB] ...`；**Broker** 模式則以 `[PEER] [ROUTER] ...` 與 `[PEER] [PUB] ...` 區分。
 *   加上 `--debug` 可額外顯示內部事件（`Listening`、`ConnectDelayed`、`ConnectRetried`、`Closed`、`CloseFailed`）。
 *   Identity 若非 UTF-8 則顯示為小寫 Hex。
+
+#### 7. Prometheus Metrics 導出頁面（`--metrics-addr`）
+僅提供 **proxy** 與 **broker** 模式使用，且啟用時**必須同時加上 `--monitor`**：
+*   **啟用方式**：`--metrics-addr <IP:PORT>`（例如 `127.0.0.1:9100` 或 `0.0.0.0:9100`；以 `std::net::SocketAddr` 解析，不支援 `localhost:9100` 等主機名稱）。
+*   **HTTP 路由與連線限制**：
+    *   `GET /metrics`：回傳 Prometheus text format 0.0.4（`text/plain; version=0.0.4; charset=utf-8`）。
+    *   `GET /`：回傳純文字提示導向 `/metrics`；其餘路徑回傳 `404 Not Found`；非 `GET` 方法回傳 `405 Method Not Allowed`。
+    *   **同時連線數限制為 1**：以單一任務循序處理每筆 HTTP 請求（具備 5 秒讀寫逾時與 8 KiB 請求標頭上限）。
+*   **匯出指標**：
+    *   共用指標：`zmqc_up`（gauge）、`zmqc_uptime_seconds`（gauge）、`zmqc_build_info{version,mode}`（gauge）、`zmqc_connections{socket="xpub|xsub|router|pub"}`（gauge）。
+    *   Proxy 模式：`zmqc_proxy_messages_forwarded_total`（counter）、`zmqc_proxy_subscription_events_total`（counter）。
+    *   Broker 模式：`zmqc_broker_messages_published_total`（counter）、`zmqc_broker_commands_broadcast_total`（counter）、`zmqc_broker_registrations_total`（counter）、`zmqc_broker_unregistrations_total`（counter）、`zmqc_broker_messages_dropped_total`（counter）、`zmqc_broker_registered_workers`（gauge）。
+
+> [!WARNING]
+> Metrics HTTP 端點未包含身分驗證或 TLS 加密。若綁定於 `0.0.0.0` 將對網段公開運作計數資訊（不含訊息內容與主題名稱），建議綁定於 `127.0.0.1` 或內網介面。
 
 ---
 

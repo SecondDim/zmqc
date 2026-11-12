@@ -9,6 +9,7 @@ use super::console::{
     format_conn_count, format_console_help, format_unknown_command, format_uptime,
     parse_console_command, ConnCounter, ConsoleCommand, STDIN_EOF_NOTICE,
 };
+use super::metrics::{spawn_metrics_server, MetricsState};
 use super::sub_mode::{bytes_to_display, parse_message_frames};
 
 /// Parses an XPUB subscription message frame into (is_subscribe, topic_display).
@@ -78,8 +79,12 @@ pub(crate) fn format_proxy_status(
     let relay_ep = args.relay_endpoint.as_deref().unwrap_or("");
     let mon = if args.monitor { "on " } else { "off" };
     let dbg = if args.debug { "on" } else { "off" };
+    let metrics_line = match args.metrics_addr {
+        Some(addr) => format!("\n  metrics: http://{}/metrics", addr),
+        None => String::new(),
+    };
     format!(
-        "[STATUS] proxy | uptime {}\n  XPUB : {} {}\n  XSUB : {} {}\n  monitor: {}   debug: {}\n  data messages forwarded : {}\n  subscription events     : {}\n  XPUB connections        : {}\n  XSUB connections        : {}",
+        "[STATUS] proxy | uptime {}\n  XPUB : {} {}\n  XSUB : {} {}\n  monitor: {}   debug: {}{}\n  data messages forwarded : {}\n  subscription events     : {}\n  XPUB connections        : {}\n  XSUB connections        : {}",
         format_uptime(uptime),
         xpub_role,
         args.endpoint,
@@ -87,6 +92,7 @@ pub(crate) fn format_proxy_status(
         relay_ep,
         mon,
         dbg,
+        metrics_line,
         data_count,
         sub_count,
         format_conn_count(xpub_conns),
@@ -137,6 +143,23 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
             Some(c.clone()),
         );
         (Some(c), Some(h))
+    } else {
+        (None, None)
+    };
+
+    // Bind metrics listener before ZMQ sockets so port conflicts fail fast
+    let (metrics_state, metrics_handle) = if let Some(m_addr) = args.metrics_addr {
+        let mut conns = Vec::with_capacity(2);
+        if let Some(c) = &xpub_counter {
+            conns.push(("xpub", c.clone()));
+        }
+        if let Some(c) = &xsub_counter {
+            conns.push(("xsub", c.clone()));
+        }
+        let state = MetricsState::new(crate::Mode::Proxy, conns);
+        let (bound_addr, handle) = spawn_metrics_server(m_addr, state.clone()).await?;
+        println!("Metrics listening on http://{}/metrics", bound_addr);
+        (Some(state), Some(handle))
     } else {
         (None, None)
     };
@@ -224,6 +247,9 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
             data_res = xsub.recv() => {
                 let msg = data_res?;
                 data_count += 1;
+                if let Some(m) = &metrics_state {
+                    m.set_proxy(data_count, sub_count);
+                }
                 if args.debug {
                     println!("{}", format_proxy_debug_data(data_count, &msg));
                 }
@@ -232,6 +258,9 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
             sub_res = xpub.recv() => {
                 let msg = sub_res?;
                 sub_count += 1;
+                if let Some(m) = &metrics_state {
+                    m.set_proxy(data_count, sub_count);
+                }
                 if args.debug {
                     if let Some((is_sub, topic)) = parse_sub_event(&msg) {
                         println!("{}", format_proxy_debug_sub(is_sub, &topic));
@@ -240,6 +269,10 @@ pub async fn run_proxy(args: crate::ZmqArgs) -> Result<(), Box<dyn Error>> {
                 xsub.send(msg).await?;
             }
         }
+    }
+
+    if let Some(h) = metrics_handle {
+        h.abort();
     }
 
     Ok(())
@@ -394,11 +427,14 @@ mod tests {
             "tcp://127.0.0.1:5555",
             "--relay-bind",
             "--monitor",
+            "--metrics-addr",
+            "127.0.0.1:9100",
         ])
         .unwrap();
         let s2 = format_proxy_status(&args2, Duration::from_secs(20), 5, 1, Some(0), Some(0));
         assert!(s2.contains("XPUB : connect tcp://127.0.0.1:5556"));
         assert!(s2.contains("XSUB : bind    tcp://127.0.0.1:5555"));
         assert!(s2.contains("monitor: on    debug: off"));
+        assert!(s2.contains("metrics: http://127.0.0.1:9100/metrics"));
     }
 }

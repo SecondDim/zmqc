@@ -856,3 +856,211 @@ async fn ac_e2e_23_monitor_tracked_connection_counter() {
         "Expected ConnCounter to return to 0 after client disconnect"
     );
 }
+
+async fn http_request(addr: std::net::SocketAddr, request: &str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::time::timeout(RECV_TIMEOUT, tokio::net::TcpStream::connect(addr))
+        .await
+        .expect("timed out connecting to metrics server")
+        .expect("connect failed");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut resp = String::new();
+    tokio::time::timeout(RECV_TIMEOUT, stream.read_to_string(&mut resp))
+        .await
+        .expect("timed out reading HTTP response")
+        .unwrap();
+    resp
+}
+
+// AC-E2E-24: Broker metrics HTTP server exposes live broker counters, worker gauge, and connection counts
+#[tokio::test]
+async fn ac_e2e_24_broker_metrics_http_endpoint() {
+    use super::broker_mode::{process_broker_message, BrokerStats, WorkerRegistry};
+    use super::console::ConnCounter;
+    use super::dealer_mode::{build_dealer_message, build_register_message};
+    use super::metrics::{spawn_metrics_server, MetricsState};
+    use super::monitor::spawn_socket_monitor_tracked;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use zeromq::{DealerSocket, RouterSocket};
+
+    let mut router = RouterSocket::new();
+    let mut pub_sock = PubSocket::new();
+
+    let r_conn: ConnCounter = Arc::new(AtomicUsize::new(0));
+    let p_conn: ConnCounter = Arc::new(AtomicUsize::new(0));
+    let _r_mon = spawn_socket_monitor_tracked(router.monitor(), None, false, Some(r_conn.clone()));
+    let _p_mon =
+        spawn_socket_monitor_tracked(pub_sock.monitor(), None, false, Some(p_conn.clone()));
+
+    let state = MetricsState::new(
+        crate::Mode::Broker,
+        vec![("router", r_conn.clone()), ("pub", p_conn.clone())],
+    );
+    let (metrics_addr, metrics_handle) =
+        spawn_metrics_server("127.0.0.1:0".parse().unwrap(), state.clone())
+            .await
+            .unwrap();
+
+    let router_ep = router.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+    let pub_ep = pub_sock.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let state_bg = state.clone();
+    let broker_handle = tokio::spawn(async move {
+        let mut reg = WorkerRegistry::default();
+        let mut stats = BrokerStats::default();
+        while let Ok(msg) = router.recv().await {
+            if process_broker_message(&msg, &mut router, &mut pub_sock, &mut reg, &mut stats, false)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            state_bg.sync_broker(&stats, reg.len());
+        }
+    });
+
+    let mut sub = connected_subscriber(&pub_ep, "news").await;
+    let mut dealer = DealerSocket::new();
+    dealer.connect(&router_ep).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    // 1) Register worker
+    dealer.send(build_register_message()).await.unwrap();
+    // 2) Send 1 malformed 1-frame message (dropped)
+    dealer
+        .send(ZmqMessage::from(Bytes::from_static(b"bad")))
+        .await
+        .unwrap();
+    // 3) Broadcast command
+    dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"_CMD"),
+            Bytes::from_static(b"ping"),
+        ))
+        .await
+        .unwrap();
+    let cmd_reply = tokio::time::timeout(RECV_TIMEOUT, dealer.recv())
+        .await
+        .expect("timed out waiting for _CMD")
+        .unwrap();
+    assert_eq!(parse_message_frames(&cmd_reply), ("_CMD".to_string(), "ping".to_string()));
+    // 4) Publish business message
+    dealer
+        .send(build_dealer_message(
+            &Bytes::from_static(b"news"),
+            Bytes::from_static(b"ok"),
+        ))
+        .await
+        .unwrap();
+    let pub_msg = recv(&mut sub).await;
+    assert_eq!(parse_message_frames(&pub_msg), ("news".to_string(), "ok".to_string()));
+
+    let resp = http_request(
+        metrics_addr,
+        "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(resp.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(resp.contains("zmqc_up 1\n"));
+    assert!(resp.contains("zmqc_broker_messages_published_total 1\n"));
+    assert!(resp.contains("zmqc_broker_commands_broadcast_total 1\n"));
+    assert!(resp.contains("zmqc_broker_registrations_total 1\n"));
+    assert!(resp.contains("zmqc_broker_messages_dropped_total 1\n"));
+    assert!(resp.contains("zmqc_broker_registered_workers 1\n"));
+    assert!(resp.contains("zmqc_connections{socket=\"router\"} 1\n"));
+    assert!(resp.contains("zmqc_connections{socket=\"pub\"} 1\n"));
+
+    broker_handle.abort();
+    metrics_handle.abort();
+}
+
+// AC-E2E-25: Proxy metrics HTTP server exposes forwarded/subscription counters and returns 404 on unknown routes
+#[tokio::test]
+async fn ac_e2e_25_proxy_metrics_http_endpoint() {
+    use super::console::ConnCounter;
+    use super::metrics::{spawn_metrics_server, MetricsState};
+    use super::monitor::spawn_socket_monitor_tracked;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use zeromq::{XPubSocket, XSubSocket};
+
+    let mut xpub = XPubSocket::new();
+    let mut xsub = XSubSocket::new();
+
+    let xpub_conn: ConnCounter = Arc::new(AtomicUsize::new(0));
+    let xsub_conn: ConnCounter = Arc::new(AtomicUsize::new(0));
+    let _xpub_mon =
+        spawn_socket_monitor_tracked(xpub.monitor(), None, false, Some(xpub_conn.clone()));
+    let _xsub_mon =
+        spawn_socket_monitor_tracked(xsub.monitor(), None, false, Some(xsub_conn.clone()));
+
+    let state = MetricsState::new(
+        crate::Mode::Proxy,
+        vec![("xpub", xpub_conn.clone()), ("xsub", xsub_conn.clone())],
+    );
+    let (metrics_addr, metrics_handle) =
+        spawn_metrics_server("127.0.0.1:0".parse().unwrap(), state.clone())
+            .await
+            .unwrap();
+
+    let xpub_ep = xpub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+    let xsub_ep = xsub.bind("tcp://127.0.0.1:0").await.unwrap().to_string();
+
+    let state_bg = state.clone();
+    let proxy_handle = tokio::spawn(async move {
+        let mut data_count = 0usize;
+        let mut sub_count = 0usize;
+        loop {
+            tokio::select! {
+                Ok(msg) = xsub.recv() => {
+                    data_count += 1;
+                    state_bg.set_proxy(data_count, sub_count);
+                    let _ = xpub.send(msg).await;
+                }
+                Ok(msg) = xpub.recv() => {
+                    sub_count += 1;
+                    state_bg.set_proxy(data_count, sub_count);
+                    let _ = xsub.send(msg).await;
+                }
+                else => break,
+            }
+        }
+    });
+
+    let mut sub = connected_subscriber(&xpub_ep, "telemetry").await;
+    let mut pub_sock = PubSocket::new();
+    pub_sock.connect(&xsub_ep).await.unwrap();
+    tokio::time::sleep(HANDSHAKE).await;
+
+    pub_sock
+        .send_two_part(&Bytes::from_static(b"telemetry"), Bytes::from_static(b"99"))
+        .await
+        .unwrap();
+    let msg = recv(&mut sub).await;
+    assert_eq!(
+        parse_message_frames(&msg),
+        ("telemetry".to_string(), "99".to_string())
+    );
+
+    let resp_ok = http_request(
+        metrics_addr,
+        "GET /metrics HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(resp_ok.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(resp_ok.contains("zmqc_proxy_messages_forwarded_total 1\n"));
+    assert!(resp_ok.contains("zmqc_proxy_subscription_events_total 1\n"));
+    assert!(resp_ok.contains("zmqc_connections{socket=\"xpub\"} 1\n"));
+    assert!(resp_ok.contains("zmqc_connections{socket=\"xsub\"} 1\n"));
+
+    let resp_404 = http_request(
+        metrics_addr,
+        "GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    )
+    .await;
+    assert!(resp_404.starts_with("HTTP/1.1 404 Not Found\r\n"));
+
+    proxy_handle.abort();
+    metrics_handle.abort();
+}

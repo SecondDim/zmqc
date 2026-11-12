@@ -65,6 +65,10 @@ pub struct ZmqArgs {
     /// Enable verbose debug output (shows all internal socket events when used with --monitor)
     #[arg(short, long, default_value_t = false)]
     pub debug: bool,
+
+    /// Expose Prometheus metrics at http://<ADDR>/metrics (proxy and broker modes only; requires --monitor)
+    #[arg(long, value_name = "ADDR")]
+    pub metrics_addr: Option<std::net::SocketAddr>,
 }
 
 impl ZmqArgs {
@@ -127,6 +131,12 @@ pub fn validate_args(args: &ZmqArgs) -> Result<(), &'static str> {
     }
     if args.mode != Mode::Proxy && args.relay_bind {
         return Err("--relay-bind is only valid in proxy mode");
+    }
+    if args.metrics_addr.is_some() && args.mode != Mode::Proxy && args.mode != Mode::Broker {
+        return Err("--metrics-addr is only valid in proxy or broker mode");
+    }
+    if args.metrics_addr.is_some() && !args.monitor {
+        return Err("--metrics-addr requires --monitor");
     }
     Ok(())
 }
@@ -213,6 +223,7 @@ mod tests {
         assert!(!a.register);
         assert!(!a.monitor);
         assert!(!a.debug);
+        assert_eq!(a.metrics_addr, None);
     }
 
     // AC-CLI-02: missing required arguments are rejected.
@@ -741,6 +752,86 @@ mod tests {
                 validate_args(&bad),
                 Err("--register is only valid in dealer mode"),
                 "{mode}"
+            );
+        }
+    }
+
+    // AC-CLI-19: --metrics-addr parses SocketAddr, is only valid in proxy/broker modes, and requires --monitor
+    #[test]
+    fn ac_cli_19_metrics_addr_validation() {
+        for mode in ["proxy", "broker"] {
+            let ok = parse(&[
+                "--mode",
+                mode,
+                "--endpoint",
+                "tcp://127.0.0.1:5555",
+                "--relay-endpoint",
+                "tcp://127.0.0.1:5556",
+                "--monitor",
+                "--metrics-addr",
+                "127.0.0.1:9100",
+            ])
+            .unwrap();
+            assert_eq!(
+                ok.metrics_addr,
+                Some("127.0.0.1:9100".parse::<std::net::SocketAddr>().unwrap())
+            );
+            assert!(validate_args(&ok).is_ok());
+
+            // Missing --monitor in proxy/broker mode
+            let no_mon = parse(&[
+                "--mode",
+                mode,
+                "--endpoint",
+                "tcp://127.0.0.1:5555",
+                "--relay-endpoint",
+                "tcp://127.0.0.1:5556",
+                "--metrics-addr",
+                "127.0.0.1:9100",
+            ])
+            .unwrap();
+            assert_eq!(
+                validate_args(&no_mon),
+                Err("--metrics-addr requires --monitor"),
+                "{mode}"
+            );
+        }
+
+        // Rejected in non-proxy/non-broker modes (even with --monitor)
+        for mode in ["pub", "sub", "dealer", "router"] {
+            let bad = parse(&[
+                "--mode",
+                mode,
+                "--endpoint",
+                "tcp://127.0.0.1:5555",
+                "--monitor",
+                "--metrics-addr",
+                "127.0.0.1:9100",
+            ])
+            .unwrap();
+            assert_eq!(
+                validate_args(&bad),
+                Err("--metrics-addr is only valid in proxy or broker mode"),
+                "{mode}"
+            );
+        }
+
+        // Invalid SocketAddr strings are rejected by clap
+        for invalid in ["localhost:9100", "9100", "not-an-addr"] {
+            assert!(
+                parse(&[
+                    "--mode",
+                    "proxy",
+                    "--endpoint",
+                    "e",
+                    "--relay-endpoint",
+                    "pe",
+                    "--monitor",
+                    "--metrics-addr",
+                    invalid,
+                ])
+                .is_err(),
+                "{invalid}"
             );
         }
     }

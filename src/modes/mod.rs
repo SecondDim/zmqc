@@ -1,5 +1,6 @@
 pub mod broker_mode;
 pub mod console;
+pub mod metrics;
 pub mod dealer_mode;
 pub mod monitor;
 pub mod proxy_mode;
